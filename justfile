@@ -42,3 +42,11 @@ smoke:
 # Refresh sqlx offline metadata
 prepare-sqlx:
     cargo sqlx prepare -- --all-targets
+
+# Build an optimized release binary at target/release/vidviewer
+build:
+    cargo build --release --locked
+
+# Install the release binary to ~/.cargo/bin (make sure that's on $PATH)
+install:
+    cargo install --path . --locked

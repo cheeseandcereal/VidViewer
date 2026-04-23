@@ -59,7 +59,13 @@ just check         # cargo check
 just test          # unit + integration
 just run           # start the server
 just doctor        # environment sanity check (ffmpeg / mpv / DB)
+just build         # release binary at target/release/vidviewer
+just install       # cargo install --path . (copies to ~/.cargo/bin)
 ```
+
+Release builds statically link all Rust code and crates; Linux system libraries
+(glibc, libm, libpthread) link dynamically. Templates and SQL migrations are
+embedded into the binary at compile time.
 
 See [AGENTS.md](./AGENTS.md) for conventions (Conventional Commits, schema migration rules,
 UTF-8 hygiene, trait-bound external process boundaries) and [`docs/`](./docs/) for the full
