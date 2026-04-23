@@ -482,8 +482,9 @@ pub struct VideoCard {
     pub updated_at_epoch: i64,
 }
 
-/// Videos in a collection, sorted by filename (case-insensitive) with `id` as
-/// a stable tiebreaker. Excludes `missing = 1`.
+/// Videos in a collection, returned in `id` order — a stable but otherwise
+/// arbitrary sequence. Display order is the caller's responsibility.
+/// Excludes `missing = 1`.
 pub async fn videos_in(pool: &SqlitePool, id: CollectionId) -> Result<Vec<VideoCard>> {
     let (kind, directory_id) = match collection_kind(pool, id).await? {
         Some(t) => t,
@@ -495,7 +496,7 @@ pub async fn videos_in(pool: &SqlitePool, id: CollectionId) -> Result<Vec<VideoC
             sqlx::query(
                 "SELECT id, filename, duration_secs, thumbnail_ok, preview_ok, missing, updated_at \
                  FROM videos WHERE directory_id = ? AND missing = 0 \
-                 ORDER BY filename COLLATE NOCASE, id",
+                 ORDER BY id",
             )
             .bind(dir)
             .fetch_all(pool)
@@ -507,7 +508,7 @@ pub async fn videos_in(pool: &SqlitePool, id: CollectionId) -> Result<Vec<VideoC
              FROM videos v \
              WHERE v.missing = 0 AND v.directory_id IN \
                (SELECT directory_id FROM collection_directories WHERE collection_id = ?) \
-             ORDER BY v.filename COLLATE NOCASE, v.id",
+             ORDER BY v.id",
         )
         .bind(id.raw())
         .fetch_all(pool)
@@ -826,51 +827,5 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, MutationError::DirectoryCollectionImmutable));
-    }
-
-    #[tokio::test]
-    async fn videos_in_sorts_by_filename_case_insensitive() {
-        let (tmp, pool, clock) = setup().await;
-        let dir_a = tmp.path().join("a");
-        let dir_b = tmp.path().join("b");
-        std::fs::create_dir_all(&dir_a).unwrap();
-        std::fs::create_dir_all(&dir_b).unwrap();
-        let a = add_dir(&pool, &clock, &dir_a, Some("A".into()))
-            .await
-            .unwrap();
-        let b = add_dir(&pool, &clock, &dir_b, Some("B".into()))
-            .await
-            .unwrap();
-
-        // Insert out of alphabetical order, across both directories, with
-        // mixed case to exercise COLLATE NOCASE.
-        add_video_row(&pool, &clock, a.id, "charlie.mp4").await;
-        add_video_row(&pool, &clock, b.id, "Alpha.mp4").await;
-        add_video_row(&pool, &clock, a.id, "bravo.mp4").await;
-        add_video_row(&pool, &clock, b.id, "delta.mp4").await;
-
-        // Directory collection A: bravo, charlie.
-        let names_a: Vec<String> = videos_in(&pool, a.collection_id)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|c| c.filename)
-            .collect();
-        assert_eq!(names_a, vec!["bravo.mp4", "charlie.mp4"]);
-
-        // Custom collection over both directories: Alpha, bravo, charlie, delta.
-        let c = create_custom(&pool, &clock, "Both", &[a.id, b.id])
-            .await
-            .unwrap();
-        let names: Vec<String> = videos_in(&pool, c.id)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|c| c.filename)
-            .collect();
-        assert_eq!(
-            names,
-            vec!["Alpha.mp4", "bravo.mp4", "charlie.mp4", "delta.mp4"]
-        );
     }
 }
