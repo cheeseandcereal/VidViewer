@@ -36,6 +36,7 @@
           </td>
           <td>
             {% if !d.removed %}
+              <button type="button" class="btn-rescan">Rescan</button>
               <button type="button" class="danger btn-remove">Remove</button>
             {% endif %}
           </td>
@@ -43,6 +44,10 @@
       {% endfor %}
       </tbody>
     </table>
+    <div class="row" style="margin-top: var(--space-3);">
+      <button type="button" class="primary" id="btn-rescan-all">Rescan all</button>
+      <span class="muted" id="scan-progress"></span>
+    </div>
   {% endif %}
 </section>
 

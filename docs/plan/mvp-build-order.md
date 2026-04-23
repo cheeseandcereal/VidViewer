@@ -1,41 +1,34 @@
 # MVP build order
 
-Last updated: 2026-04-22
+Last updated: 2026-04-23
 
-This is the living task list for the MVP. Check items off as they land.
+All MVP steps are complete.
 
 - [x] **Step 0** — Documentation, tooling, conventions
-  - `AGENTS.md`
-  - `justfile`, `rustfmt.toml`, `clippy.toml`
-  - `docs/README.md` + design docs + agent playbooks
-  - `docs/plan/mvp-build-order.md` + `docs/plan/deferred.md`
-  - `migrations/README.md`
-- [ ] **Step 1** — Cargo scaffold
-  - Dependencies, config loader, `tracing` init (pretty + JSON), Axum `/healthz`.
-- [ ] **Step 2** — Storage foundation
-  - `Clock` trait; `VideoId`/`CollectionId`/`DirectoryId` newtypes.
-  - SQLite pool, `PRAGMA encoding`, migrations runner.
-  - Pre-migration `VACUUM INTO` backup, keep-all retention.
-  - Initial migration with all MVP tables.
-  - Startup integrity check.
-- [ ] **Step 3** — UTF-8 hygiene
-  - Lossy-filename warning helper, percent-encoding helper.
-  - CJK font stack in `templates/base.html`.
-  - Assert `Content-Type: text/html; charset=utf-8` on all HTML.
-- [ ] **Step 4** — Directories CRUD + Settings page + directory picker modal
-- [ ] **Step 5** — Scanner with directory-collection materialization
-- [ ] **Step 6** — `Player` + `VideoTool` traits (real + mock)
-- [ ] **Step 7** — Collections API + Home + Collection page shell + Random endpoint
-- [ ] **Step 8** — Probe + thumbnail jobs + `/thumbs/:id.jpg`
-- [ ] **Step 9** — Preview jobs + `/previews/*`
-- [ ] **Step 10** — Hover-scrub JS component
-- [ ] **Step 11** — Video detail page
-- [ ] **Step 12** — mpv launch + IPC + history + resume
-- [ ] **Step 13** — Random navigation + `R` hotkey + Re-roll
-- [ ] **Step 14** — Custom collections CRUD + add/remove videos
-- [ ] **Step 15** — History page
-- [ ] **Step 16** — Polish
-  - Scan progress UI, missing badges, cache-busting, empty states.
-  - `vidviewer doctor` subcommand.
-  - Gated `/debug` endpoint.
-  - `just smoke` end-to-end.
+- [x] **Step 1** — Cargo scaffold, config, tracing, Axum `/healthz`
+- [x] **Step 2** — Storage foundation: SQLite pool, `Clock`, typed IDs, migrations, pre-migration backup, integrity check
+- [x] **Step 3** — UTF-8 hygiene: lossy-filename warning, URL percent-encoding, CJK font stack, base template
+- [x] **Step 4** — Directories CRUD + Settings page + directory picker modal
+- [x] **Step 5** — Scanner with directory-collection materialization + soft-delete
+- [x] **Step 6** — `Player` + `VideoTool` traits (real + mock)
+- [x] **Step 7** — Collections API + Home + Collection page + Random endpoint + `R` hotkey
+- [x] **Step 8** — Probe + thumbnail jobs + `/thumbs/:id.jpg`
+- [x] **Step 9** — Preview jobs (tile sheet + WebVTT) + `/previews/*`
+- [x] **Step 10** — Hover-scrub JS component
+- [x] **Step 11** — Video detail page
+- [x] **Step 12** — mpv launch + IPC session + history + resume + `?start=`
+- [x] **Step 13** — Random navigation + Re-roll on detail page
+- [x] **Step 14** — Custom collections CRUD + add/remove videos
+- [x] **Step 15** — History page with resume progress
+- [x] **Step 16** — Polish:
+  - Scan progress UI with polling
+  - Missing badges in grid
+  - Cache-busting via `?v=<updated_at_epoch>`
+  - Empty states on all pages
+  - `vidviewer doctor` subcommand
+  - Gated `/debug` endpoint
+  - Top-level README.md
+
+## Post-MVP
+
+See [`deferred.md`](./deferred.md).

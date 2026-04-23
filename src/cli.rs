@@ -94,6 +94,8 @@ async fn doctor(cfg: &crate::config::Config) -> Result<()> {
     use std::process::Command;
     tracing::info!(port = cfg.port, "vidviewer doctor");
 
+    let mut problems = 0u32;
+
     for (label, bin) in [
         ("ffmpeg", "ffmpeg"),
         ("ffprobe", "ffprobe"),
@@ -106,6 +108,7 @@ async fn doctor(cfg: &crate::config::Config) -> Result<()> {
                 tracing::info!(binary = label, version = %first, "ok");
             }
             Ok(out) => {
+                problems += 1;
                 tracing::error!(
                     binary = label,
                     code = ?out.status.code(),
@@ -113,6 +116,7 @@ async fn doctor(cfg: &crate::config::Config) -> Result<()> {
                 );
             }
             Err(err) => {
+                problems += 1;
                 tracing::error!(binary = label, error = %err, "binary not found on PATH");
             }
         }
@@ -120,15 +124,31 @@ async fn doctor(cfg: &crate::config::Config) -> Result<()> {
 
     let db_path = config::database_path();
     tracing::info!(path = %db_path.display(), "database path");
-    tracing::info!(path = %config::thumb_cache_dir().display(), "thumb cache");
-    tracing::info!(path = %config::preview_cache_dir().display(), "preview cache");
-
-    // Try opening the DB (and migrating if needed) to surface startup issues.
-    match crate::db::init(cfg, &db_path).await {
-        Ok(_) => tracing::info!("database ok"),
-        Err(err) => tracing::error!(error = format!("{err:#}"), "database init failed"),
+    for (label, path) in [
+        ("thumb cache", config::thumb_cache_dir()),
+        ("preview cache", config::preview_cache_dir()),
+    ] {
+        match std::fs::create_dir_all(&path) {
+            Ok(()) => tracing::info!(path = %path.display(), "{label} writable"),
+            Err(err) => {
+                problems += 1;
+                tracing::error!(path = %path.display(), error = %err, "{label} not writable");
+            }
+        }
     }
 
+    match crate::db::init(cfg, &db_path).await {
+        Ok(_) => tracing::info!("database ok"),
+        Err(err) => {
+            problems += 1;
+            tracing::error!(error = format!("{err:#}"), "database init failed");
+        }
+    }
+
+    if problems > 0 {
+        anyhow::bail!("doctor found {problems} problem(s)");
+    }
+    tracing::info!("all checks passed");
     Ok(())
 }
 

@@ -12,6 +12,7 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 use crate::state::AppState;
 
 pub mod api;
+pub mod debug;
 pub mod pages;
 
 pub async fn serve(state: AppState) -> Result<()> {
@@ -117,6 +118,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/fs/list", axum::routing::get(api::fs_list))
         .route("/api/scan", axum::routing::post(api::start_scan))
         .route("/api/scan/status", axum::routing::get(api::scan_status))
+        .route("/debug", axum::routing::get(debug::debug_dump))
         .nest_service("/static", static_dir)
         .nest_service("/thumbs", thumbs_dir)
         .nest_service("/previews", previews_dir)

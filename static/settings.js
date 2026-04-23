@@ -102,13 +102,24 @@
         if (ev.key === 'Enter') load(pathInput.value);
     });
 
-    // Row-level actions: rename + remove.
+    // Row-level actions: rename + remove + rescan.
     document.addEventListener('click', async ev => {
         const target = ev.target;
         if (!(target instanceof HTMLElement)) return;
         const row = target.closest('tr[data-dir-id]');
+
+        if (target.id === 'btn-rescan-all') {
+            await startScan(null);
+            return;
+        }
+
         if (!row) return;
         const id = row.dataset.dirId;
+
+        if (target.classList.contains('btn-rescan')) {
+            await startScan(id);
+            return;
+        }
 
         if (target.classList.contains('btn-remove')) {
             if (!confirm('Remove this directory?\n\n' +
@@ -138,4 +149,50 @@
             window.location.reload();
         }
     });
+
+    async function startScan(dirId) {
+        const url = dirId ? `/api/scan?dir_id=${encodeURIComponent(dirId)}` : '/api/scan';
+        const resp = await fetch(url, { method: 'POST' });
+        if (!resp.ok) {
+            alert('Scan failed to start');
+            return;
+        }
+        pollScanStatus();
+    }
+
+    let pollTimer = null;
+    function pollScanStatus() {
+        const el = document.getElementById('scan-progress');
+        if (!el) return;
+        if (pollTimer) return;
+        const tick = async () => {
+            try {
+                const resp = await fetch('/api/scan/status');
+                if (!resp.ok) return;
+                const s = await resp.json();
+                if (s.phase === 'walking') {
+                    el.textContent = `Scanning… files seen ${s.files_seen}, new ${s.new_videos}, changed ${s.changed_videos}, missing ${s.missing_videos}`;
+                } else if (s.phase === 'done') {
+                    el.textContent = `Scan complete. new ${s.new_videos}, changed ${s.changed_videos}, missing ${s.missing_videos}.`;
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                    // Reload after a short delay so counts refresh.
+                    setTimeout(() => window.location.reload(), 800);
+                } else if (s.phase === 'failed') {
+                    el.textContent = `Scan failed: ${s.error || 'unknown error'}`;
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                } else {
+                    el.textContent = '';
+                }
+            } catch (e) {
+                // ignore transient errors
+            }
+        };
+        pollTimer = setInterval(tick, 800);
+        tick();
+    }
+
+    // On page load, if a scan is in progress, pick up polling.
+    pollScanStatus();
 })();
