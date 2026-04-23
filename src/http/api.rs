@@ -1,4 +1,8 @@
 //! JSON API handlers.
+//!
+//! Handlers return `Result<Response, ApiError>`. The [`ApiError`](crate::http::error::ApiError)
+//! wraps the various module-level typed errors and implements `IntoResponse`, so the
+//! error path uses `?` rather than a match cascade at each site.
 
 use std::path::PathBuf;
 
@@ -11,9 +15,8 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
-    collections::{self, MutationError},
-    directories::{self, AddError},
-    fs_browse, history,
+    collections, directories, fs_browse, history,
+    http::error::{bad_request, ApiError},
     ids::{CollectionId, DirectoryId, VideoId},
     player, scanner,
     state::AppState,
@@ -22,11 +25,9 @@ use crate::{
 
 // ---------- Directories ----------
 
-pub async fn list_directories(State(state): State<AppState>) -> Response {
-    match directories::list(&state.pool, true).await {
-        Ok(list) => Json(list).into_response(),
-        Err(err) => internal(err),
-    }
+pub async fn list_directories(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let list = directories::list(&state.pool, true).await?;
+    Ok(Json(list).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,25 +39,22 @@ pub struct AddDirectoryReq {
 pub async fn add_directory(
     State(state): State<AppState>,
     Json(req): Json<AddDirectoryReq>,
-) -> Response {
+) -> Result<Response, ApiError> {
     let path = PathBuf::from(&req.path);
-    match directories::add(&state.pool, &state.clock, &path, req.label).await {
-        Ok(dir) => {
-            // Immediately kick off a scan for the newly-added directory.
-            let handle = scanner::spawn_one(
-                state.pool.clone(),
-                state.clock.clone(),
-                scanner::CachePaths::from_config(&state.config),
-                dir.id,
-            );
-            {
-                let mut reg = state.scans.write().await;
-                reg.current = Some(handle);
-            }
-            (StatusCode::CREATED, Json(dir)).into_response()
-        }
-        Err(err) => add_error_response(err),
+    let dir = directories::add(&state.pool, &state.clock, &path, req.label).await?;
+
+    // Immediately kick off a scan for the newly-added directory.
+    let handle = scanner::spawn_one(
+        state.pool.clone(),
+        state.clock.clone(),
+        scanner::CachePaths::from_config(&state.config),
+        dir.id,
+    );
+    {
+        let mut reg = state.scans.write().await;
+        reg.current = Some(handle);
     }
+    Ok((StatusCode::CREATED, Json(dir)).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,14 +66,13 @@ pub async fn patch_directory(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     Json(req): Json<PatchDirectoryReq>,
-) -> Response {
+) -> Result<Response, ApiError> {
     if req.label.trim().is_empty() {
-        return bad_request("label must be non-empty");
+        return Err(bad_request("bad_request", "label must be non-empty"));
     }
-    match directories::set_label(&state.pool, &state.clock, DirectoryId(id), &req.label).await {
-        Ok(dir) => Json(dir).into_response(),
-        Err(err) => internal(err),
-    }
+    let dir =
+        directories::set_label(&state.pool, &state.clock, DirectoryId(id), &req.label).await?;
+    Ok(Json(dir).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,14 +85,10 @@ pub async fn delete_directory(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     Query(q): Query<DeleteDirectoryQuery>,
-) -> Response {
+) -> Result<Response, ApiError> {
     let mode = q.mode.as_deref().unwrap_or("soft");
     if mode != "soft" && mode != "hard" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "bad_mode", "message": "mode must be 'soft' or 'hard'"})),
-        )
-            .into_response();
+        return Err(bad_request("bad_mode", "mode must be 'soft' or 'hard'"));
     }
 
     // Abort any in-flight jobs for videos in this directory before we mutate
@@ -112,18 +105,15 @@ pub async fn delete_directory(
 
     match mode {
         "soft" => {
-            match directories::soft_remove(&state.pool, &state.clock, DirectoryId(id)).await {
-                Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
-                Err(err) => internal(err),
-            }
+            directories::soft_remove(&state.pool, &state.clock, DirectoryId(id)).await?;
+            Ok((StatusCode::NO_CONTENT, ()).into_response())
         }
         "hard" => {
             let cache = scanner::CachePaths::from_config(&state.config);
-            match directories::hard_remove(&state.pool, &state.clock, &cache, DirectoryId(id)).await
-            {
-                Ok(report) => (StatusCode::OK, Json(report)).into_response(),
-                Err(err) => internal(err),
-            }
+            let report =
+                directories::hard_remove(&state.pool, &state.clock, &cache, DirectoryId(id))
+                    .await?;
+            Ok((StatusCode::OK, Json(report)).into_response())
         }
         _ => unreachable!("mode validated above"),
     }
@@ -157,10 +147,6 @@ async fn cancel_running_jobs_for_directory(
         return Ok(());
     }
 
-    // Remove the aborted rows from the `jobs` table. The worker loop also
-    // deletes them when it observes the JoinError::cancelled, but we delete
-    // them here defensively so a subsequent operation in the same transactional
-    // flow (like hard-remove) sees a clean state.
     let placeholders = vec!["?"; aborted.len()].join(",");
     let sql = format!("DELETE FROM jobs WHERE id IN ({placeholders})");
     let mut q = sqlx::query(&sql);
@@ -179,11 +165,6 @@ async fn cancel_running_jobs_for_directory(
     Ok(())
 }
 
-fn add_error_response(err: AddError) -> Response {
-    let status = err.status();
-    (status, Json(err)).into_response()
-}
-
 // ---------- FS picker ----------
 
 #[derive(Debug, Deserialize)]
@@ -191,8 +172,10 @@ pub struct FsListQuery {
     pub path: Option<String>,
 }
 
-pub async fn fs_list(State(state): State<AppState>, Query(q): Query<FsListQuery>) -> Response {
-    // Resolve starting path: query > ui_state > $HOME > /
+pub async fn fs_list(
+    State(state): State<AppState>,
+    Query(q): Query<FsListQuery>,
+) -> Result<Response, ApiError> {
     let path = if let Some(p) = q.path {
         PathBuf::from(p)
     } else if let Ok(Some(last)) = ui_state::get_last_browsed_path(&state.pool).await {
@@ -206,14 +189,9 @@ pub async fn fs_list(State(state): State<AppState>, Query(q): Query<FsListQuery>
         home_or_root()
     };
 
-    match fs_browse::list_dirs(&path) {
-        Ok(listing) => {
-            // Record this path for next time.
-            let _ = ui_state::set_last_browsed_path(&state.pool, &listing.path).await;
-            Json(listing).into_response()
-        }
-        Err(err) => (err.status(), Json(err)).into_response(),
-    }
+    let listing = fs_browse::list_dirs(&path)?;
+    let _ = ui_state::set_last_browsed_path(&state.pool, &listing.path).await;
+    Ok(Json(listing).into_response())
 }
 
 fn home_or_root() -> PathBuf {
@@ -227,7 +205,10 @@ pub struct ScanReq {
     pub dir_id: Option<i64>,
 }
 
-pub async fn start_scan(State(state): State<AppState>, Query(q): Query<ScanReq>) -> Response {
+pub async fn start_scan(
+    State(state): State<AppState>,
+    Query(q): Query<ScanReq>,
+) -> Result<Response, ApiError> {
     let only = q.dir_id.map(DirectoryId);
     let cache = scanner::CachePaths::from_config(&state.config);
     let handle = match only {
@@ -238,7 +219,7 @@ pub async fn start_scan(State(state): State<AppState>, Query(q): Query<ScanReq>)
         let mut reg = state.scans.write().await;
         reg.current = Some(handle);
     }
-    Json(serde_json::json!({"status": "started"})).into_response()
+    Ok(Json(serde_json::json!({"status": "started"})).into_response())
 }
 
 pub async fn scan_status(State(state): State<AppState>) -> Response {
@@ -278,18 +259,12 @@ pub async fn scan_status(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
-/// Per-directory job status. Used by the Settings page to show each directory's
-/// current activity inline, without any all-time global counters.
-pub async fn directory_job_status(State(state): State<AppState>) -> Response {
-    match crate::jobs::counts_by_directory(&state.pool).await {
-        Ok(map) => {
-            // Re-key by string so JSON serializes cleanly regardless of JSON number limits.
-            let keyed: std::collections::HashMap<String, _> =
-                map.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-            Json(keyed).into_response()
-        }
-        Err(err) => internal(err),
-    }
+/// Per-directory job status. Used by the Settings page.
+pub async fn directory_job_status(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let map = crate::jobs::counts_by_directory(&state.pool).await?;
+    let keyed: std::collections::HashMap<String, _> =
+        map.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    Ok(Json(keyed).into_response())
 }
 
 // ---------- Collections ----------
@@ -302,16 +277,14 @@ pub struct KindQuery {
 pub async fn list_collections(
     State(state): State<AppState>,
     Query(q): Query<KindQuery>,
-) -> Response {
+) -> Result<Response, ApiError> {
     let kind = match q.kind.as_deref() {
         Some("directory") => Some(collections::Kind::Directory),
         Some("custom") => Some(collections::Kind::Custom),
         _ => None,
     };
-    match collections::list(&state.pool, kind).await {
-        Ok(v) => Json(v).into_response(),
-        Err(err) => internal(err),
-    }
+    let v = collections::list(&state.pool, kind).await?;
+    Ok(Json(v).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -322,11 +295,9 @@ pub struct CreateCollectionReq {
 pub async fn create_collection(
     State(state): State<AppState>,
     Json(req): Json<CreateCollectionReq>,
-) -> Response {
-    match collections::create_custom(&state.pool, &state.clock, &req.name).await {
-        Ok(c) => (StatusCode::CREATED, Json(c)).into_response(),
-        Err(err) => mutation_error_response(err),
-    }
+) -> Result<Response, ApiError> {
+    let c = collections::create_custom(&state.pool, &state.clock, &req.name).await?;
+    Ok((StatusCode::CREATED, Json(c)).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -338,28 +309,25 @@ pub async fn rename_collection(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     Json(req): Json<RenameCollectionReq>,
-) -> Response {
-    match collections::rename(&state.pool, &state.clock, CollectionId(id), &req.name).await {
-        Ok(c) => Json(c).into_response(),
-        Err(err) => mutation_error_response(err),
-    }
+) -> Result<Response, ApiError> {
+    let c = collections::rename(&state.pool, &state.clock, CollectionId(id), &req.name).await?;
+    Ok(Json(c).into_response())
 }
 
-pub async fn delete_collection(State(state): State<AppState>, AxPath(id): AxPath<i64>) -> Response {
-    match collections::delete_custom(&state.pool, CollectionId(id)).await {
-        Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
-        Err(err) => mutation_error_response(err),
-    }
+pub async fn delete_collection(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+) -> Result<Response, ApiError> {
+    collections::delete_custom(&state.pool, CollectionId(id)).await?;
+    Ok((StatusCode::NO_CONTENT, ()).into_response())
 }
 
 pub async fn list_collection_videos(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
-) -> Response {
-    match collections::videos_in(&state.pool, CollectionId(id)).await {
-        Ok(v) => Json(v).into_response(),
-        Err(err) => internal(err),
-    }
+) -> Result<Response, ApiError> {
+    let v = collections::videos_in(&state.pool, CollectionId(id)).await?;
+    Ok(Json(v).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -371,48 +339,33 @@ pub async fn add_video_to_collection(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     Json(req): Json<CollectionVideoReq>,
-) -> Response {
-    match collections::add_video(
+) -> Result<Response, ApiError> {
+    collections::add_video(
         &state.pool,
         &state.clock,
         CollectionId(id),
         &VideoId(req.video_id),
     )
-    .await
-    {
-        Ok(()) => (StatusCode::CREATED, ()).into_response(),
-        Err(err) => mutation_error_response(err),
-    }
+    .await?;
+    Ok((StatusCode::CREATED, ()).into_response())
 }
 
 pub async fn remove_video_from_collection(
     State(state): State<AppState>,
     AxPath((cid, vid)): AxPath<(i64, String)>,
-) -> Response {
-    match collections::remove_video(&state.pool, CollectionId(cid), &VideoId(vid)).await {
-        Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
-        Err(err) => mutation_error_response(err),
-    }
+) -> Result<Response, ApiError> {
+    collections::remove_video(&state.pool, CollectionId(cid), &VideoId(vid)).await?;
+    Ok((StatusCode::NO_CONTENT, ()).into_response())
 }
 
 pub async fn random_from_collection(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
-) -> Response {
-    match collections::random_video(&state.pool, CollectionId(id)).await {
-        Ok(Some(v)) => Json(serde_json::json!({ "video_id": v })).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "empty"})),
-        )
-            .into_response(),
-        Err(err) => internal(err),
+) -> Result<Response, ApiError> {
+    match collections::random_video(&state.pool, CollectionId(id)).await? {
+        Some(v) => Ok(Json(serde_json::json!({ "video_id": v })).into_response()),
+        None => Err(ApiError::NotFound("empty")),
     }
-}
-
-fn mutation_error_response(err: MutationError) -> Response {
-    let status = err.status();
-    (status, Json(err)).into_response()
 }
 
 // ---------- Videos + player ----------
@@ -422,16 +375,14 @@ pub struct PlayQuery {
     pub start: Option<f64>,
 }
 
-pub async fn get_video(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
+pub async fn get_video(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Result<Response, ApiError> {
     let vid = VideoId(id);
-    match videos::get_detail(&state.pool, &vid).await {
-        Ok(Some(d)) => Json(d).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "not_found"})),
-        )
-            .into_response(),
-        Err(err) => internal(err),
+    match videos::get_detail(&state.pool, &vid).await? {
+        Some(d) => Ok(Json(d).into_response()),
+        None => Err(ApiError::NotFound("not_found")),
     }
 }
 
@@ -439,25 +390,13 @@ pub async fn play_video(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
     Query(q): Query<PlayQuery>,
-) -> Response {
+) -> Result<Response, ApiError> {
     let vid = VideoId(id);
-    let video = match videos::get_detail(&state.pool, &vid).await {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "not_found"})),
-            )
-                .into_response();
-        }
-        Err(err) => return internal(err),
-    };
+    let video = videos::get_detail(&state.pool, &vid)
+        .await?
+        .ok_or(ApiError::NotFound("not_found"))?;
     if video.video.missing {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "video_missing"})),
-        )
-            .into_response();
+        return Err(bad_request("video_missing", "video file is not on disk"));
     }
     let abs_path = std::path::PathBuf::from(&video.directory_path).join(&video.video.relative_path);
     let start = if let Some(s) = q.start {
@@ -468,23 +407,11 @@ pub async fn play_video(
             .unwrap_or(0.0)
     };
 
-    // Launch via trait.
-    let session = match state.player.launch(&abs_path, start).await {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::error!(error = %err, "launch failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "player_launch_failed",
-                    "message": err.to_string(),
-                })),
-            )
-                .into_response();
-        }
-    };
+    let session = state.player.launch(&abs_path, start).await.map_err(|err| {
+        tracing::error!(error = %err, "launch failed");
+        ApiError::Internal(err.context("player launch"))
+    })?;
 
-    // Hand off the child to the session manager if we actually spawned one.
     if let Some(child) = session.child {
         player::session::spawn(
             state.pool.clone(),
@@ -495,44 +422,24 @@ pub async fn play_video(
         );
     }
 
-    (
+    Ok((
         StatusCode::ACCEPTED,
         Json(serde_json::json!({"status": "launched", "start": start})),
     )
-        .into_response()
+        .into_response())
 }
 
 // ---------- History ----------
 
-pub async fn list_history(State(state): State<AppState>) -> Response {
-    match history::list(&state.pool).await {
-        Ok(v) => Json(v).into_response(),
-        Err(err) => internal(err),
-    }
+pub async fn list_history(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let v = history::list(&state.pool).await?;
+    Ok(Json(v).into_response())
 }
 
-pub async fn delete_history(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
-    match history::clear(&state.pool, &VideoId(id)).await {
-        Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
-        Err(err) => internal(err),
-    }
-}
-
-// ---------- helpers ----------
-
-fn internal<E: std::fmt::Display>(err: E) -> Response {
-    tracing::error!(error = %err, "internal api error");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error": "internal", "message": err.to_string()})),
-    )
-        .into_response()
-}
-
-fn bad_request(message: &str) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({"error": "bad_request", "message": message})),
-    )
-        .into_response()
+pub async fn delete_history(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Result<Response, ApiError> {
+    history::clear(&state.pool, &VideoId(id)).await?;
+    Ok((StatusCode::NO_CONTENT, ()).into_response())
 }

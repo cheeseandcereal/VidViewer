@@ -13,6 +13,7 @@ use crate::state::AppState;
 
 pub mod api;
 pub mod debug;
+pub mod error;
 pub mod pages;
 
 pub async fn serve(state: AppState) -> Result<()> {
