@@ -58,10 +58,13 @@ async fn probe_enqueues_thumbnail_and_preview() {
     let workers = Workers {
         pool: pool.clone(),
         clock: clock.clone(),
+        config: std::sync::Arc::new(Config {
+            thumbnail_width: 320,
+            preview_min_interval: 2.0,
+            preview_target_count: 100,
+            ..cfg.clone()
+        }),
         video_tool,
-        thumbnail_width: 320,
-        preview_min_interval: 2.0,
-        preview_target_count: 100,
         thumb_dir: cfg.thumb_cache_dir(),
         preview_dir: cfg.preview_cache_dir(),
         registry: vidviewer::jobs::registry::JobRegistry::new(),

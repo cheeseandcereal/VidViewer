@@ -2,7 +2,7 @@
 //!
 //! See `docs/design/05-jobs-and-workers.md`.
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use sqlx::{Row, SqlitePool};
@@ -11,6 +11,7 @@ use tracing::{error, info};
 
 use crate::{
     clock::ClockRef,
+    config::Config,
     ids::VideoId,
     jobs::{
         self,
@@ -24,10 +25,8 @@ use crate::{
 pub struct Workers {
     pub pool: SqlitePool,
     pub clock: ClockRef,
+    pub config: Arc<Config>,
     pub video_tool: VideoToolRef,
-    pub thumbnail_width: u32,
-    pub preview_min_interval: f64,
-    pub preview_target_count: u32,
     pub thumb_dir: PathBuf,
     pub preview_dir: PathBuf,
     pub registry: crate::jobs::registry::JobRegistry,
@@ -42,9 +41,9 @@ impl Workers {
         info!(
             general_concurrency,
             preview_concurrency,
-            thumbnail_width = self.thumbnail_width,
-            preview_min_interval = self.preview_min_interval,
-            preview_target_count = self.preview_target_count,
+            thumbnail_width = self.config.thumbnail_width,
+            preview_min_interval = self.config.preview_min_interval,
+            preview_target_count = self.config.preview_target_count,
             "starting job workers"
         );
         let mut handles = Vec::new();
@@ -266,12 +265,12 @@ impl Workers {
             video_id = %video_id,
             path = %abs_path.display(),
             at_secs = at,
-            width = self.thumbnail_width,
+            width = self.config.thumbnail_width,
             dst = %dst.display(),
             "generating thumbnail"
         );
         self.video_tool
-            .thumbnail(&abs_path, &dst, at, self.thumbnail_width)
+            .thumbnail(&abs_path, &dst, at, self.config.thumbnail_width)
             .await?;
 
         let now_s = self.clock.now().to_rfc3339();
@@ -292,8 +291,8 @@ impl Workers {
         }
         let Some(plan) = preview_plan::plan(&PlanInput {
             duration_secs: duration,
-            min_interval_secs: self.preview_min_interval,
-            target_count: self.preview_target_count,
+            min_interval_secs: self.config.preview_min_interval,
+            target_count: self.config.preview_target_count,
         }) else {
             return Err(anyhow!("plan generation returned None despite duration"));
         };

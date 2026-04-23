@@ -89,10 +89,13 @@ async fn directory_remove_aborts_running_jobs() {
     let workers = Workers {
         pool: pool.clone(),
         clock: clock.clone(),
+        config: Arc::new(Config {
+            thumbnail_width: 320,
+            preview_min_interval: 2.0,
+            preview_target_count: 10,
+            ..cfg.clone()
+        }),
         video_tool: tool,
-        thumbnail_width: 320,
-        preview_min_interval: 2.0,
-        preview_target_count: 10,
         thumb_dir: cache.thumb.clone(),
         preview_dir: cache.preview.clone(),
         registry: registry.clone(),

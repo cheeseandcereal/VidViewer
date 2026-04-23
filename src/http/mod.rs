@@ -55,10 +55,8 @@ pub async fn serve(state: AppState) -> Result<()> {
     let workers = crate::jobs::worker::Workers {
         pool: state.pool.clone(),
         clock: state.clock.clone(),
+        config: state.config.clone(),
         video_tool: state.video_tool.clone(),
-        thumbnail_width: state.config.thumbnail_width,
-        preview_min_interval: state.config.preview_min_interval,
-        preview_target_count: state.config.preview_target_count,
         thumb_dir: state.config.thumb_cache_dir(),
         preview_dir: state.config.preview_cache_dir(),
         registry: state.job_registry.clone(),
