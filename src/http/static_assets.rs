@@ -30,3 +30,19 @@ pub async fn serve(Path(path): Path<String>) -> Response<Body> {
             .unwrap(),
     }
 }
+
+/// Serve the site favicon at `/favicon.ico`. We don't ship an ICO file —
+/// some browsers request this path implicitly regardless of the `<link>`
+/// tag, so we respond with the same embedded SVG and the correct MIME type.
+pub async fn favicon() -> Response<Body> {
+    match StaticAssets::get("favicon.svg") {
+        Some(file) => Response::builder()
+            .header(header::CONTENT_TYPE, "image/svg+xml")
+            .body(Body::from(file.data.into_owned()))
+            .unwrap(),
+        None => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap(),
+    }
+}

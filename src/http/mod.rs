@@ -159,6 +159,7 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/debug", axum::routing::get(debug::debug_dump))
         .route("/static/*path", axum::routing::get(static_assets::serve))
+        .route("/favicon.ico", axum::routing::get(static_assets::favicon))
         .nest_service("/thumbs", thumbs_dir)
         .nest_service("/previews", previews_dir)
         .layer(TraceLayer::new_for_http())
@@ -304,5 +305,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn favicon_is_served_from_embedded_svg() {
+        let app = router(test_state().await);
+        // Both the classic /favicon.ico path and the declared /static/favicon.svg
+        // path should return the SVG bytes with the right MIME type.
+        for uri in ["/favicon.ico", "/static/favicon.svg"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "uri={uri}");
+            let ctype = resp
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert_eq!(ctype, "image/svg+xml", "uri={uri}");
+            let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            assert!(
+                body.starts_with(b"<?xml") || body.starts_with(b"<svg"),
+                "uri={uri} body did not look like SVG"
+            );
+        }
     }
 }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- VidViewer favicon: a play triangle in a rounded square. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" ry="12" fill="#1a1b26"/>
+  <path d="M24 18 L24 46 L48 32 Z" fill="#7aa2f7"/>
+</svg>
