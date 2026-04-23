@@ -106,6 +106,13 @@ pub(crate) fn router(state: AppState) -> Router {
             "/api/collections/:id/random",
             axum::routing::get(api::random_from_collection),
         )
+        .route("/api/videos/:id", axum::routing::get(api::get_video))
+        .route("/api/videos/:id/play", axum::routing::post(api::play_video))
+        .route("/api/history", axum::routing::get(api::list_history))
+        .route(
+            "/api/history/:id",
+            axum::routing::delete(api::delete_history),
+        )
         .route("/api/fs/list", axum::routing::get(api::fs_list))
         .route("/api/scan", axum::routing::post(api::start_scan))
         .route("/api/scan/status", axum::routing::get(api::scan_status))

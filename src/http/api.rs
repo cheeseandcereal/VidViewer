@@ -13,11 +13,11 @@ use serde::Deserialize;
 use crate::{
     collections::{self, MutationError},
     directories::{self, AddError},
-    fs_browse,
+    fs_browse, history,
     ids::{CollectionId, DirectoryId, VideoId},
-    scanner,
+    player, scanner,
     state::AppState,
-    ui_state,
+    ui_state, videos,
 };
 
 // ---------- Directories ----------
@@ -278,6 +278,109 @@ pub async fn random_from_collection(
 fn mutation_error_response(err: MutationError) -> Response {
     let status = err.status();
     (status, Json(err)).into_response()
+}
+
+// ---------- Videos + player ----------
+
+#[derive(Debug, Deserialize)]
+pub struct PlayQuery {
+    pub start: Option<f64>,
+}
+
+pub async fn get_video(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
+    let vid = VideoId(id);
+    match videos::get_detail(&state.pool, &vid).await {
+        Ok(Some(d)) => Json(d).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "not_found"})),
+        )
+            .into_response(),
+        Err(err) => internal(err),
+    }
+}
+
+pub async fn play_video(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<PlayQuery>,
+) -> Response {
+    let vid = VideoId(id);
+    let video = match videos::get_detail(&state.pool, &vid).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "not_found"})),
+            )
+                .into_response();
+        }
+        Err(err) => return internal(err),
+    };
+    if video.video.missing {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "video_missing"})),
+        )
+            .into_response();
+    }
+    let abs_path = std::path::PathBuf::from(&video.directory_path).join(&video.video.relative_path);
+    let start = if let Some(s) = q.start {
+        s.max(0.0)
+    } else {
+        history::start_position(&state.pool, &vid)
+            .await
+            .unwrap_or(0.0)
+    };
+
+    // Launch via trait.
+    let session = match state.player.launch(&abs_path, start).await {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::error!(error = %err, "launch failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "player_launch_failed",
+                    "message": err.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Hand off the child to the session manager if we actually spawned one.
+    if let Some(child) = session.child {
+        player::session::spawn(
+            state.pool.clone(),
+            state.clock.clone(),
+            vid.clone(),
+            session.socket_path.clone(),
+            child,
+        );
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"status": "launched", "start": start})),
+    )
+        .into_response()
+}
+
+// ---------- History ----------
+
+pub async fn list_history(State(state): State<AppState>) -> Response {
+    match history::list(&state.pool).await {
+        Ok(v) => Json(v).into_response(),
+        Err(err) => internal(err),
+    }
+}
+
+pub async fn delete_history(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
+    match history::clear(&state.pool, &VideoId(id)).await {
+        Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
+        Err(err) => internal(err),
+    }
 }
 
 // ---------- helpers ----------

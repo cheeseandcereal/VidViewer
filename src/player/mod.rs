@@ -13,6 +13,8 @@ use async_trait::async_trait;
 use crate::config::Config;
 use crate::ids::VideoId;
 
+pub mod session;
+
 /// A handle to an active player session. Dropping it does not stop the player.
 #[derive(Debug)]
 pub struct SessionHandle {

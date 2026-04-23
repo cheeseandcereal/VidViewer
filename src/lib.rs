@@ -10,6 +10,7 @@ pub mod config;
 pub mod db;
 pub mod directories;
 pub mod fs_browse;
+pub mod history;
 pub mod http;
 pub mod ids;
 pub mod jobs;
