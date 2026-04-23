@@ -96,4 +96,11 @@ impl JobRegistry {
     pub fn is_empty(&self) -> bool {
         self.inner.lock().unwrap().is_empty()
     }
+
+    /// True if a job with this id is currently tracked. Used by the stuck-job
+    /// watchdog to distinguish "still running in a live worker task" from
+    /// "orphaned DB row with no task behind it".
+    pub fn contains(&self, job_id: i64) -> bool {
+        self.inner.lock().unwrap().contains_key(&job_id)
+    }
 }

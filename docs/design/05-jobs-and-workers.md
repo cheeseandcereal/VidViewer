@@ -37,6 +37,30 @@ Separating preview generation prevents long tile-sheet encodes from starving qui
 - `failed` jobs are visible via `/debug` and in scan-status reports.
 - A failed `probe` blocks enqueuing of `thumbnail`/`preview` for that video; those remain absent.
 - The user can trigger a rescan for the directory; if nothing changed on disk, the scanner does not re-enqueue. A dedicated "retry failed jobs" endpoint can be added post-MVP.
+- `ffprobe` runs under a 60-second wall-clock timeout. A hung ffprobe would
+  otherwise leave a `probe` row in `running` forever, and the
+  `idx_jobs_outstanding_unique` partial unique index would prevent a new
+  probe from being enqueued for the same video. The timeout turns that into
+  a normal `failed` outcome, unsticking the `(kind, video_id)` slot.
+
+## Stuck-job watchdog
+
+In addition to startup reconciliation, a periodic watchdog task runs while
+workers are alive. It finds rows in `running` whose id is not tracked by the
+`JobRegistry` **and** whose `updated_at` is older than a safety threshold
+(5 minutes), and resets them to `pending` so a worker can re-claim them.
+
+This is a safety net for any edge case where a worker task disappears
+without transitioning the DB row — a DB write failure, a panic between
+`task.await` and the match arm, an external process signal, etc. Without
+the watchdog, such a row would stay `running` forever and the partial
+unique index on outstanding jobs would block every future enqueue for
+that `(kind, video_id)` pair. Rescans would appear to "do nothing" for the
+affected video.
+
+The registry check is the source of truth: a long-running ffmpeg invocation
+is fine, since its task is still tracked. Only orphaned rows with no live
+task behind them are reset.
 
 ## Cancellation
 

@@ -1,11 +1,17 @@
 //! Jobs module unit tests.
 
+use std::sync::Arc;
+
 use sqlx::SqlitePool;
 
 use crate::{
     clock,
     directories::{add as add_dir, soft_remove},
-    jobs::{counts::count_by_status, enqueue_on, reconcile::reconcile_on_startup, Kind},
+    jobs::{
+        counts::count_by_status, enqueue_on, reconcile::reconcile_on_startup,
+        registry::JobRegistry, worker::Workers, Kind,
+    },
+    video_tool::{MockVideoTool, VideoToolRef},
 };
 
 fn test_cache(tmp: &std::path::Path) -> crate::scanner::CachePaths {
@@ -163,4 +169,135 @@ async fn enqueue_is_idempotent_for_outstanding_jobs() {
         .await
         .unwrap();
     assert_eq!(after_redo, 2, "new enqueue after done must succeed");
+}
+
+fn make_workers(pool: SqlitePool, clock: crate::clock::ClockRef, tmp: &std::path::Path) -> Workers {
+    let cfg = crate::config::Config {
+        data_dir: tmp.to_path_buf(),
+        backup_dir: tmp.join("backups"),
+        ..crate::config::Config::default()
+    };
+    let video_tool: VideoToolRef = Arc::new(MockVideoTool::new());
+    Workers {
+        pool,
+        clock,
+        config: Arc::new(cfg.clone()),
+        video_tool,
+        thumb_dir: cfg.thumb_cache_dir(),
+        preview_dir: cfg.preview_cache_dir(),
+        registry: JobRegistry::new(),
+    }
+}
+
+#[tokio::test]
+async fn watchdog_resets_stuck_running_jobs_not_tracked_by_registry() {
+    let (tmp, pool) = setup().await;
+    let clock = clock::system();
+    let a = tmp.path().join("a");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::write(a.join("x.mp4"), b"x").unwrap();
+    add_dir(&pool, &clock, &a, None).await.unwrap();
+    let cache = test_cache(tmp.path());
+    crate::scanner::scan_all(&pool, &clock, &cache)
+        .await
+        .unwrap();
+
+    // Force the scanner-enqueued probe into a fake-stuck state: status=running
+    // with an old updated_at, not tracked in the registry.
+    let old = (clock.now() - chrono::Duration::hours(1)).to_rfc3339();
+    sqlx::query("UPDATE jobs SET status = 'running', updated_at = ?")
+        .bind(&old)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let workers = make_workers(pool.clone(), clock.clone(), tmp.path());
+    let reset = workers
+        .reset_stuck_running(chrono::Duration::minutes(5))
+        .await
+        .unwrap();
+    assert_eq!(reset, 1);
+
+    let (pending, running, _, _) = count_by_status(&pool).await.unwrap();
+    assert_eq!(pending, 1, "stuck running must have been reset to pending");
+    assert_eq!(running, 0);
+}
+
+#[tokio::test]
+async fn watchdog_leaves_live_running_jobs_alone() {
+    let (tmp, pool) = setup().await;
+    let clock = clock::system();
+    let a = tmp.path().join("a");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::write(a.join("x.mp4"), b"x").unwrap();
+    add_dir(&pool, &clock, &a, None).await.unwrap();
+    let cache = test_cache(tmp.path());
+    crate::scanner::scan_all(&pool, &clock, &cache)
+        .await
+        .unwrap();
+
+    // Flip the row to running with an old updated_at…
+    let old = (clock.now() - chrono::Duration::hours(1)).to_rfc3339();
+    sqlx::query("UPDATE jobs SET status = 'running', updated_at = ?")
+        .bind(&old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job_id: i64 = sqlx::query_scalar("SELECT id FROM jobs LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // …but register the id with the registry so the watchdog considers the
+    // task alive. The handle/token values don't matter for the lookup.
+    let workers = make_workers(pool.clone(), clock.clone(), tmp.path());
+    let dummy_task: tokio::task::JoinHandle<()> = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let abort = dummy_task.abort_handle();
+    workers.registry.register(
+        job_id,
+        crate::ids::VideoId("dummy".into()),
+        abort,
+        tokio_util::sync::CancellationToken::new(),
+    );
+
+    let reset = workers
+        .reset_stuck_running(chrono::Duration::minutes(5))
+        .await
+        .unwrap();
+    assert_eq!(reset, 0);
+    let (_, running, _, _) = count_by_status(&pool).await.unwrap();
+    assert_eq!(running, 1, "tracked running job must not be touched");
+
+    dummy_task.abort();
+}
+
+#[tokio::test]
+async fn watchdog_respects_age_threshold() {
+    let (tmp, pool) = setup().await;
+    let clock = clock::system();
+    let a = tmp.path().join("a");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::write(a.join("x.mp4"), b"x").unwrap();
+    add_dir(&pool, &clock, &a, None).await.unwrap();
+    let cache = test_cache(tmp.path());
+    crate::scanner::scan_all(&pool, &clock, &cache)
+        .await
+        .unwrap();
+
+    // Running very recently — should be spared.
+    let fresh = clock.now().to_rfc3339();
+    sqlx::query("UPDATE jobs SET status = 'running', updated_at = ?")
+        .bind(&fresh)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let workers = make_workers(pool.clone(), clock.clone(), tmp.path());
+    let reset = workers
+        .reset_stuck_running(chrono::Duration::minutes(5))
+        .await
+        .unwrap();
+    assert_eq!(reset, 0, "fresh running job must not be touched");
 }

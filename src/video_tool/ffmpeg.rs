@@ -33,7 +33,12 @@ impl Default for FfmpegTool {
 #[async_trait]
 impl VideoTool for FfmpegTool {
     async fn probe(&self, path: &Path) -> Result<ProbeResult> {
-        let out = tokio::process::Command::new("ffprobe")
+        // 60 seconds is *far* more than ffprobe needs for any real video —
+        // typical runs are well under a second, even for huge files. A hung
+        // ffprobe would otherwise leave the job row in `running` forever.
+        const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+        let fut = tokio::process::Command::new("ffprobe")
             .arg("-v")
             .arg("error")
             .arg("-print_format")
@@ -44,9 +49,16 @@ impl VideoTool for FfmpegTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .output()
-            .await
-            .with_context(|| format!("spawning ffprobe for {}", path.display()))?;
+            .output();
+
+        let out = match tokio::time::timeout(PROBE_TIMEOUT, fut).await {
+            Ok(res) => res.with_context(|| format!("spawning ffprobe for {}", path.display()))?,
+            Err(_) => bail!(
+                "ffprobe timed out after {}s for {}",
+                PROBE_TIMEOUT.as_secs(),
+                path.display()
+            ),
+        };
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             bail!(

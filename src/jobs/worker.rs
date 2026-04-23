@@ -56,6 +56,17 @@ impl Workers {
             let w = self.clone();
             handles.push(tokio::spawn(async move { w.run_lane(Lane::Preview).await }));
         }
+        // Watchdog: finds `running` rows that no live worker task is tracking
+        // and resets them to `pending` so they can be re-claimed. Without this
+        // a job row could be stuck in `running` forever if the owning task
+        // disappears without cleaning up (e.g. a DB write failure on `mark`,
+        // an external process signal, or any other edge case we haven't
+        // anticipated). Runs periodically; conservative thresholds mean it
+        // never touches jobs that are actually making progress.
+        {
+            let w = self.clone();
+            handles.push(tokio::spawn(async move { w.run_stuck_watchdog().await }));
+        }
         handles
     }
 
@@ -101,24 +112,37 @@ impl Workers {
                     match outcome {
                         Ok(Ok(())) => {
                             info!(elapsed_ms, "job done");
-                            let _ = self.mark(job.id, Status::Done, None).await;
+                            if let Err(err) = self.mark(job.id, Status::Done, None).await {
+                                error!(error = %err, "failed to mark job done; watchdog will reset it");
+                            }
                         }
                         Ok(Err(err)) => {
                             let msg = format!("{err:#}");
                             error!(elapsed_ms, error = %msg, "job failed");
-                            let _ = self.mark(job.id, Status::Failed, Some(&msg)).await;
+                            if let Err(mark_err) =
+                                self.mark(job.id, Status::Failed, Some(&msg)).await
+                            {
+                                error!(error = %mark_err, "failed to mark job failed; watchdog will reset it");
+                            }
                         }
                         Err(join_err) if join_err.is_cancelled() => {
                             info!(elapsed_ms, "job cancelled (aborted)");
-                            let _ = sqlx::query("DELETE FROM jobs WHERE id = ?")
+                            if let Err(err) = sqlx::query("DELETE FROM jobs WHERE id = ?")
                                 .bind(job.id)
                                 .execute(&self.pool)
-                                .await;
+                                .await
+                            {
+                                error!(error = %err, "failed to delete cancelled job; watchdog will reset it");
+                            }
                         }
                         Err(join_err) => {
                             let msg = format!("{join_err}");
                             error!(elapsed_ms, error = %msg, "job task panicked");
-                            let _ = self.mark(job.id, Status::Failed, Some(&msg)).await;
+                            if let Err(mark_err) =
+                                self.mark(job.id, Status::Failed, Some(&msg)).await
+                            {
+                                error!(error = %mark_err, "failed to mark panicked job failed; watchdog will reset it");
+                            }
                         }
                     }
                 }
@@ -131,6 +155,99 @@ impl Workers {
                 }
             }
         }
+    }
+
+    /// Periodic watchdog that rescues job rows stuck in `running` after their
+    /// worker task has disappeared. Runs forever as a background task.
+    ///
+    /// Why this exists: every well-behaved exit path from `run_lane` transitions
+    /// the row to `done` / `failed` / deletes it. If *any* of those DB writes
+    /// fails (locked DB, panic mid-transaction, process crashing between
+    /// `task.await` and the match arm, etc.) the row is stranded in `running`
+    /// and — because of `idx_jobs_outstanding_unique` — no duplicate can be
+    /// enqueued for the same `(kind, video_id)` either. The watchdog un-sticks
+    /// those rows by resetting them to `pending` so a worker can re-claim.
+    ///
+    /// The registry check is the source of truth for "is a task still alive
+    /// behind this row" — a stale `updated_at` alone isn't enough (long ffmpeg
+    /// runs are fine; they just don't touch `updated_at`). A row is only
+    /// considered stuck if its id is not in the registry AND its `updated_at`
+    /// is older than `STUCK_AFTER` — the age threshold guards against the
+    /// claim/register race window where the row exists before the registry
+    /// entry does.
+    async fn run_stuck_watchdog(self) {
+        // Tune this if you add a long-running job kind. Probe is ~sub-second,
+        // thumbnail is a few seconds, preview is a few seconds to a minute
+        // depending on preview count and video length. 5 minutes is well clear
+        // of all realistic runtimes.
+        const STUCK_AFTER: chrono::Duration = chrono::Duration::minutes(5);
+        const POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+        // Wait one tick before the first check so startup reconcile has a
+        // chance to run and workers have a chance to pick up real work.
+        tokio::time::sleep(POLL_INTERVAL).await;
+
+        loop {
+            if let Err(err) = self.reset_stuck_running(STUCK_AFTER).await {
+                tracing::warn!(error = %err, "stuck-job watchdog pass failed");
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Find `running` rows older than `threshold` whose id is not tracked by
+    /// the live registry and reset them to `pending`. Returns the number of
+    /// rows reset (for tests and observability).
+    pub(crate) async fn reset_stuck_running(&self, threshold: chrono::Duration) -> Result<u64> {
+        let cutoff = (self.clock.now() - threshold).to_rfc3339();
+        let rows = sqlx::query(
+            "SELECT id, kind, video_id FROM jobs \
+             WHERE status = 'running' AND updated_at < ?",
+        )
+        .bind(&cutoff)
+        .fetch_all(&self.pool)
+        .await
+        .context("listing stuck running jobs")?;
+
+        let mut reset_ids: Vec<i64> = Vec::new();
+        for row in &rows {
+            let id: i64 = row.get("id");
+            if self.registry.contains(id) {
+                // A live worker task is still executing this job; leave it
+                // alone no matter how old `updated_at` is.
+                continue;
+            }
+            reset_ids.push(id);
+        }
+
+        if reset_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let now_s = self.clock.now().to_rfc3339();
+        let placeholders = vec!["?"; reset_ids.len()].join(",");
+        let sql = format!(
+            "UPDATE jobs SET status = 'pending', updated_at = ? \
+             WHERE status = 'running' AND id IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql).bind(&now_s);
+        for id in &reset_ids {
+            q = q.bind(id);
+        }
+        let affected = q
+            .execute(&self.pool)
+            .await
+            .context("resetting stuck running jobs")?
+            .rows_affected();
+
+        if affected > 0 {
+            tracing::warn!(
+                reset = affected,
+                ids = ?reset_ids,
+                "watchdog reset stuck running jobs to pending"
+            );
+        }
+        Ok(affected)
     }
 
     async fn claim(&self, lane: Lane) -> Result<Option<Job>> {
