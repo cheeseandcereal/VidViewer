@@ -16,6 +16,14 @@ pub mod pages;
 
 pub async fn serve(state: AppState) -> Result<()> {
     let port = state.config.port;
+
+    // Kick off an initial scan in the background if configured.
+    if state.config.scan_on_startup {
+        let handle = crate::scanner::spawn_all(state.pool.clone(), state.clock.clone());
+        let mut reg = state.scans.write().await;
+        reg.current = Some(handle);
+    }
+
     let app = router(state);
 
     // Localhost only — this app is not meant for LAN / public exposure.
@@ -48,6 +56,8 @@ pub(crate) fn router(state: AppState) -> Router {
             axum::routing::patch(api::patch_directory).delete(api::delete_directory),
         )
         .route("/api/fs/list", axum::routing::get(api::fs_list))
+        .route("/api/scan", axum::routing::post(api::start_scan))
+        .route("/api/scan/status", axum::routing::get(api::scan_status))
         .nest_service("/static", static_dir)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

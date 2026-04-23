@@ -132,7 +132,41 @@ async fn doctor(cfg: &crate::config::Config) -> Result<()> {
     Ok(())
 }
 
-async fn scan(_cfg: &crate::config::Config, _dry_run: bool, _dir_id: Option<i64>) -> Result<()> {
-    tracing::warn!("scan subcommand not yet implemented (see docs/plan/mvp-build-order.md)");
-    Ok(())
+async fn scan(cfg: &crate::config::Config, dry_run: bool, dir_id: Option<i64>) -> Result<()> {
+    let db_path = crate::config::database_path();
+    let pool = crate::db::init(cfg, &db_path).await?;
+    let clock = crate::clock::system();
+    let only = dir_id.map(crate::ids::DirectoryId);
+
+    if dry_run {
+        let report = crate::scanner::dry_run_report(&pool, only).await?;
+        tracing::info!(
+            seen = report.seen_files,
+            inserts = report.would_insert.len(),
+            updates = report.would_update.len(),
+            missings = report.would_mark_missing.len(),
+            "dry-run summary"
+        );
+        for p in report.would_insert.iter().take(20) {
+            tracing::info!(action = "would_insert", path = %p);
+        }
+        for p in report.would_update.iter().take(20) {
+            tracing::info!(action = "would_update", path = %p);
+        }
+        for p in report.would_mark_missing.iter().take(20) {
+            tracing::info!(action = "would_mark_missing", path = %p);
+        }
+        Ok(())
+    } else {
+        let report = crate::scanner::scan_all(&pool, &clock).await?;
+        tracing::info!(
+            dirs = report.directories_scanned,
+            files = report.files_seen,
+            new = report.new_videos,
+            changed = report.changed_videos,
+            missing = report.missing_videos,
+            "scan complete"
+        );
+        Ok(())
+    }
 }

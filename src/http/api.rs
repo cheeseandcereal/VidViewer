@@ -14,6 +14,7 @@ use crate::{
     directories::{self, AddError},
     fs_browse,
     ids::DirectoryId,
+    scanner,
     state::AppState,
     ui_state,
 };
@@ -109,6 +110,50 @@ pub async fn fs_list(State(state): State<AppState>, Query(q): Query<FsListQuery>
 
 fn home_or_root() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+}
+
+// ---------- Scan ----------
+
+#[derive(Debug, Deserialize)]
+pub struct ScanReq {
+    pub dir_id: Option<i64>,
+}
+
+pub async fn start_scan(State(state): State<AppState>, Query(q): Query<ScanReq>) -> Response {
+    let only = q.dir_id.map(DirectoryId);
+    let handle = match only {
+        Some(id) => scanner::spawn_one(state.pool.clone(), state.clock.clone(), id),
+        None => scanner::spawn_all(state.pool.clone(), state.clock.clone()),
+    };
+    {
+        let mut reg = state.scans.write().await;
+        reg.current = Some(handle);
+    }
+    Json(serde_json::json!({"status": "started"})).into_response()
+}
+
+pub async fn scan_status(State(state): State<AppState>) -> Response {
+    let reg = state.scans.read().await;
+    let Some(handle) = &reg.current else {
+        return Json(serde_json::json!({"phase": "idle"})).into_response();
+    };
+    let p = &handle.progress;
+    let phase = match p.phase.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => "walking",
+        1 => "done",
+        2 => "failed",
+        _ => "unknown",
+    };
+    let error = p.error.lock().unwrap().clone();
+    Json(serde_json::json!({
+        "phase": phase,
+        "files_seen": p.files_seen.load(std::sync::atomic::Ordering::Relaxed),
+        "new_videos": p.new_videos.load(std::sync::atomic::Ordering::Relaxed),
+        "changed_videos": p.changed_videos.load(std::sync::atomic::Ordering::Relaxed),
+        "missing_videos": p.missing_videos.load(std::sync::atomic::Ordering::Relaxed),
+        "error": error,
+    }))
+    .into_response()
 }
 
 // ---------- helpers ----------
