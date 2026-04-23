@@ -7,7 +7,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{anyhow, Context, Result};
 use sqlx::{Row, SqlitePool};
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{error, info, Instrument};
 
 use crate::{
     clock::ClockRef,
@@ -62,13 +62,14 @@ impl Workers {
         loop {
             match self.claim(lane).await {
                 Ok(Some(job)) => {
-                    let started = std::time::Instant::now();
-                    info!(
+                    let span = tracing::info_span!(
+                        "job",
                         job_id = job.id,
                         kind = job.kind.as_str(),
                         video_id = %job.video_id,
-                        "job started"
                     );
+                    let started = std::time::Instant::now();
+                    span.in_scope(|| info!("job started"));
 
                     // Spawn the actual work as a separate task so we have an
                     // `AbortHandle` to expose via the registry. Abort propagates
@@ -77,8 +78,9 @@ impl Workers {
                     // child is terminated as the future is dropped.
                     let w = self.clone();
                     let job_clone = job.clone();
-                    let task: tokio::task::JoinHandle<Result<()>> =
-                        tokio::spawn(async move { w.process(&job_clone).await });
+                    let task: tokio::task::JoinHandle<Result<()>> = tokio::spawn(
+                        async move { w.process(&job_clone).await }.instrument(span.clone()),
+                    );
                     let abort = task.abort_handle();
                     self.registry.register(job.id, job.video_id.clone(), abort);
 
@@ -86,56 +88,27 @@ impl Workers {
                     self.registry.deregister(job.id);
 
                     let elapsed_ms = started.elapsed().as_millis() as u64;
+                    let _enter = span.enter();
                     match outcome {
                         Ok(Ok(())) => {
-                            info!(
-                                job_id = job.id,
-                                kind = job.kind.as_str(),
-                                video_id = %job.video_id,
-                                elapsed_ms,
-                                "job done"
-                            );
+                            info!(elapsed_ms, "job done");
                             let _ = self.mark(job.id, Status::Done, None).await;
                         }
                         Ok(Err(err)) => {
                             let msg = format!("{err:#}");
-                            error!(
-                                job_id = job.id,
-                                kind = job.kind.as_str(),
-                                video_id = %job.video_id,
-                                elapsed_ms,
-                                error = %msg,
-                                "job failed"
-                            );
+                            error!(elapsed_ms, error = %msg, "job failed");
                             let _ = self.mark(job.id, Status::Failed, Some(&msg)).await;
                         }
                         Err(join_err) if join_err.is_cancelled() => {
-                            // Aborted by an external action (directory remove).
-                            // Remove the row outright so it doesn't linger as
-                            // `running` and doesn't reappear after reconciliation.
-                            info!(
-                                job_id = job.id,
-                                kind = job.kind.as_str(),
-                                video_id = %job.video_id,
-                                elapsed_ms,
-                                "job cancelled (aborted)"
-                            );
+                            info!(elapsed_ms, "job cancelled (aborted)");
                             let _ = sqlx::query("DELETE FROM jobs WHERE id = ?")
                                 .bind(job.id)
                                 .execute(&self.pool)
                                 .await;
                         }
                         Err(join_err) => {
-                            // Panic inside the worker task.
                             let msg = format!("{join_err}");
-                            error!(
-                                job_id = job.id,
-                                kind = job.kind.as_str(),
-                                video_id = %job.video_id,
-                                elapsed_ms,
-                                error = %msg,
-                                "job task panicked"
-                            );
+                            error!(elapsed_ms, error = %msg, "job task panicked");
                             let _ = self.mark(job.id, Status::Failed, Some(&msg)).await;
                         }
                     }
@@ -214,7 +187,7 @@ impl Workers {
 
     async fn run_probe(&self, video_id: &VideoId) -> Result<()> {
         let (abs_path, _duration) = self.load_for_job(video_id).await?;
-        info!(video_id = %video_id, path = %abs_path.display(), "probing video");
+        info!(path = %abs_path.display(), "probing video");
         let result = self.video_tool.probe(&abs_path).await?;
 
         let now_s = self.clock.now().to_rfc3339();
@@ -238,10 +211,9 @@ impl Workers {
         if result.duration_secs.unwrap_or(0.0) > 0.0 {
             jobs::enqueue_on(&mut conn, Kind::Preview, video_id).await?;
         } else {
-            info!(video_id = %video_id, "skipping preview enqueue: duration unknown or zero");
+            info!("skipping preview enqueue: duration unknown or zero");
         }
         info!(
-            video_id = %video_id,
             duration_secs = ?result.duration_secs,
             width = ?result.width,
             height = ?result.height,
@@ -262,7 +234,6 @@ impl Workers {
         };
         let dst = self.thumb_dir.join(format!("{}.jpg", video_id.as_str()));
         info!(
-            video_id = %video_id,
             path = %abs_path.display(),
             at_secs = at,
             width = self.config.thumbnail_width,
@@ -302,7 +273,6 @@ impl Workers {
         let vtt_path = preview_dir.join(format!("{}.vtt", video_id.as_str()));
 
         info!(
-            video_id = %video_id,
             path = %abs_path.display(),
             duration_secs = duration,
             previews = plan.count,
