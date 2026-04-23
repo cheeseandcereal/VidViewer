@@ -88,9 +88,13 @@ pub(super) async fn scan_one(
     // is self-contained in `update_changed_video`.
     let mut surviving: Vec<(VideoId, bool, bool, Option<f64>)> = Vec::new();
 
-    // 2. Walk the directory.
+    // 2. Walk the directory. Non-recursive: only videos sitting directly in
+    //    the configured directory are indexed. Subdirectories are ignored
+    //    deliberately — if a user wants a nested folder indexed, they add
+    //    it as its own top-level directory in Settings.
     for entry in WalkDir::new(&root)
         .follow_links(true)
+        .max_depth(1)
         .into_iter()
         .filter_map(|r| r.ok())
     {

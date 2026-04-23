@@ -17,7 +17,10 @@ For each directory with `removed = 0`:
 
 1. `SELECT relative_path, size_bytes, mtime_unix, missing, id FROM videos WHERE directory_id = ?`
    into a hashmap keyed by `relative_path`.
-2. Walk the directory tree (tokio-friendly; yields periodically). Filter to video extensions.
+2. Walk the directory **non-recursively** (`max_depth = 1`). Only files
+   sitting directly inside the configured directory are considered; any
+   subdirectory tree is ignored. A user who wants a nested folder indexed
+   adds it as its own top-level directory in Settings.
 3. For each file:
    - Stat → `(size_bytes, mtime_unix)`.
    - If `relative_path` not in map:

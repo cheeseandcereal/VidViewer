@@ -50,6 +50,37 @@ async fn inserts_new_videos_and_enqueues_probe() {
 }
 
 #[tokio::test]
+async fn scan_is_not_recursive() {
+    // Files in subdirectories of the configured root must be ignored.
+    // Only the top-level is indexed; nested folders are a user's problem
+    // to add as their own directories.
+    let (tmp, pool, clock, cache) = setup().await;
+    let videos_dir = tmp.path().join("videos");
+    std::fs::create_dir_all(&videos_dir).unwrap();
+    write_video(&videos_dir, "top.mp4", b"x");
+    let nested = videos_dir.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    write_video(&nested, "buried.mp4", b"y");
+    let deeper = nested.join("deeper");
+    std::fs::create_dir_all(&deeper).unwrap();
+    write_video(&deeper, "deep.mp4", b"z");
+
+    add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+    let report = scan_all(&pool, &clock, &cache).await.unwrap();
+    assert_eq!(
+        report.new_videos, 1,
+        "only the top-level video should be indexed"
+    );
+    assert_eq!(report.files_seen, 1);
+
+    let filenames: Vec<String> = sqlx::query_scalar("SELECT filename FROM videos")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(filenames, vec!["top.mp4"]);
+}
+
+#[tokio::test]
 async fn second_scan_is_noop() {
     let (tmp, pool, clock, cache) = setup().await;
     let videos_dir = tmp.path().join("videos");
