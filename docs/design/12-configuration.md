@@ -23,8 +23,8 @@ preview_min_interval = 2       # minimum seconds between previews
 preview_target_count = 100     # max previews per video
 
 # Workers
-worker_concurrency  = 3        # probe + thumbnail
-preview_concurrency = 1        # preview
+worker_concurrency  = 10       # probe + thumbnail
+preview_concurrency = 8        # preview
 
 # Scanner
 scan_on_startup = true

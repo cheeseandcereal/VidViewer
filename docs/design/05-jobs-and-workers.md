@@ -23,8 +23,8 @@ in two worker lanes backed by the `jobs` table.
 
 ## Lanes
 
-- **General lane**: concurrency = `config.worker_concurrency` (default 3). Handles `probe` and `thumbnail`.
-- **Preview lane**: concurrency = `config.preview_concurrency` (default 1). Handles `preview`.
+- **General lane**: concurrency = `config.worker_concurrency` (default 10). Handles `probe` and `thumbnail`.
+- **Preview lane**: concurrency = `config.preview_concurrency` (default 8). Handles `preview`.
 
 Separating preview generation prevents long tile-sheet encodes from starving quick thumbnails.
 

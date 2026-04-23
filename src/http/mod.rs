@@ -28,6 +28,29 @@ pub async fn serve(state: AppState) -> Result<()> {
         }
     }
 
+    // Reconcile leftover jobs from the previous run before workers come online.
+    match crate::jobs::reconcile_on_startup(&state.pool).await {
+        Ok(report) => {
+            if report.dropped_orphan_video
+                + report.dropped_removed_dir
+                + report.dropped_missing_video
+                + report.reset_running
+                > 0
+            {
+                tracing::info!(
+                    dropped_orphan_video = report.dropped_orphan_video,
+                    dropped_removed_dir = report.dropped_removed_dir,
+                    dropped_missing_video = report.dropped_missing_video,
+                    reset_running = report.reset_running,
+                    "reconciled leftover jobs at startup"
+                );
+            }
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "startup job reconciliation failed");
+        }
+    }
+
     // Spawn background job workers.
     let workers = crate::jobs::worker::Workers {
         pool: state.pool.clone(),

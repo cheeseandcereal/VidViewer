@@ -160,3 +160,181 @@ pub async fn counts(pool: &SqlitePool) -> Result<JobCounts> {
     }
     Ok(out)
 }
+
+/// Report produced by [`reconcile_on_startup`].
+#[derive(Debug, Default, Clone)]
+pub struct ReconcileReport {
+    /// Jobs deleted because their video has been deleted.
+    pub dropped_orphan_video: u64,
+    /// Jobs deleted because the video's directory has been soft-removed.
+    pub dropped_removed_dir: u64,
+    /// Jobs deleted because the video has been marked missing.
+    pub dropped_missing_video: u64,
+    /// `running` jobs reset back to `pending` (orphaned by a prior crash).
+    pub reset_running: u64,
+}
+
+/// Reconcile the jobs table against current reality. Intended to run once at startup,
+/// before workers are spawned.
+///
+/// Rules:
+/// - Any job whose `video_id` no longer exists is deleted.
+/// - Any job whose video's directory is soft-removed (`directories.removed = 1`) is deleted.
+/// - Any job whose video is flagged `missing = 1` is deleted — the file isn't on disk anymore,
+///   so generating thumbnails/previews would fail.
+/// - Any job in `running` state is orphaned (the process that claimed it is gone); reset it
+///   back to `pending` so a worker picks it up cleanly.
+///
+/// Only targets `pending` and `running` — `done` and `failed` rows are preserved as history.
+pub async fn reconcile_on_startup(pool: &SqlitePool) -> Result<ReconcileReport> {
+    let mut report = ReconcileReport::default();
+    let mut tx = pool.begin().await.context("begin reconcile tx")?;
+
+    // Drop jobs whose video no longer exists.
+    let res = sqlx::query(
+        "DELETE FROM jobs \
+         WHERE status IN ('pending', 'running') \
+         AND video_id NOT IN (SELECT id FROM videos)",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("deleting jobs with orphaned video_id")?;
+    report.dropped_orphan_video = res.rows_affected();
+
+    // Drop jobs whose video's directory has been soft-removed.
+    let res = sqlx::query(
+        "DELETE FROM jobs \
+         WHERE status IN ('pending', 'running') \
+         AND video_id IN ( \
+            SELECT v.id FROM videos v \
+            JOIN directories d ON d.id = v.directory_id \
+            WHERE d.removed = 1 \
+         )",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("deleting jobs whose directory was soft-removed")?;
+    report.dropped_removed_dir = res.rows_affected();
+
+    // Drop jobs for missing videos — file isn't on disk, so ffmpeg would fail.
+    let res = sqlx::query(
+        "DELETE FROM jobs \
+         WHERE status IN ('pending', 'running') \
+         AND video_id IN (SELECT id FROM videos WHERE missing = 1)",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("deleting jobs for missing videos")?;
+    report.dropped_missing_video = res.rows_affected();
+
+    // Reset remaining 'running' jobs — they were left behind by a prior crash.
+    let now_s = Utc::now().to_rfc3339();
+    let res = sqlx::query(
+        "UPDATE jobs SET status = 'pending', updated_at = ? \
+         WHERE status = 'running'",
+    )
+    .bind(&now_s)
+    .execute(&mut *tx)
+    .await
+    .context("resetting orphaned running jobs")?;
+    report.reset_running = res.rows_affected();
+
+    tx.commit().await.context("commit reconcile tx")?;
+    Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock;
+    use crate::directories::{add as add_dir, soft_remove};
+
+    async fn setup() -> (tempfile::TempDir, SqlitePool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            backup_dir: tmp.path().join("backups"),
+            ..crate::config::Config::default()
+        };
+        let db_path = tmp.path().join("vidviewer.db");
+        let pool = crate::db::init(&cfg, &db_path).await.unwrap();
+        (tmp, pool)
+    }
+
+    #[tokio::test]
+    async fn reconcile_drops_jobs_for_removed_directory_and_resets_running() {
+        let (tmp, pool) = setup().await;
+        let clock = clock::system();
+
+        // Two directories, each with a video.
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("x.mp4"), b"x").unwrap();
+        std::fs::write(b.join("y.mp4"), b"y").unwrap();
+
+        let dir_a = add_dir(&pool, &clock, &a, None).await.unwrap();
+        let _dir_b = add_dir(&pool, &clock, &b, None).await.unwrap();
+        crate::scanner::scan_all(&pool, &clock).await.unwrap();
+
+        // Two probe jobs enqueued; simulate one of them as 'running' to look like a crash.
+        let a_video_id: String =
+            sqlx::query_scalar("SELECT id FROM videos WHERE directory_id = ? LIMIT 1")
+                .bind(dir_a.id.raw())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("UPDATE jobs SET status = 'running' WHERE video_id = ?")
+            .bind(&a_video_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Soft-remove directory A. Its pending jobs would be cleared by soft_remove,
+        // but the 'running' one was skipped (worker running), so it's still there.
+        soft_remove(&pool, &clock, dir_a.id).await.unwrap();
+        let (_, running_before, _, _) = count_by_status(&pool).await.unwrap();
+        assert_eq!(
+            running_before, 1,
+            "running job for soft-removed directory should still exist pre-reconcile"
+        );
+
+        let report = reconcile_on_startup(&pool).await.unwrap();
+        // The 'running' job for the removed-directory video should be dropped.
+        assert!(report.dropped_removed_dir >= 1);
+
+        // Directory B's pending job should have been reset to pending (it was
+        // already pending, so reset_running may be zero here — just confirm it
+        // survived reconciliation).
+        let (pending_after, running_after, _, _) = count_by_status(&pool).await.unwrap();
+        assert_eq!(
+            running_after, 0,
+            "no jobs should remain in 'running' after reconcile"
+        );
+        assert!(
+            pending_after >= 1,
+            "directory B's job should still be pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_resets_running_for_active_video() {
+        let (tmp, pool) = setup().await;
+        let clock = clock::system();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::write(a.join("x.mp4"), b"x").unwrap();
+        add_dir(&pool, &clock, &a, None).await.unwrap();
+        crate::scanner::scan_all(&pool, &clock).await.unwrap();
+
+        sqlx::query("UPDATE jobs SET status = 'running'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let report = reconcile_on_startup(&pool).await.unwrap();
+        assert_eq!(report.reset_running, 1);
+        let (pending, running, _, _) = count_by_status(&pool).await.unwrap();
+        assert_eq!(pending, 1);
+        assert_eq!(running, 0);
+    }
+}
