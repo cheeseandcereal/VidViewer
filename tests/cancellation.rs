@@ -5,12 +5,14 @@
 //! real ffmpeg.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 use vidviewer::{
     clock::{self, ClockRef},
     config::Config,
@@ -43,6 +45,7 @@ impl VideoTool for BlockingTool {
         _dst: &Path,
         _plan: &PreviewPlan,
         _duration_secs: f64,
+        _cancel: &CancellationToken,
     ) -> Result<()> {
         Ok(())
     }
@@ -142,4 +145,122 @@ async fn directory_remove_aborts_running_jobs() {
     let _ = dir.id;
     let _ = DirectoryId(0);
     let _: PathBuf = cache.thumb.clone();
+}
+
+/// A `VideoTool` whose `previews` loops internally, simulating the
+/// per-timestamp ffmpeg loop. It increments a counter every "tile" and sleeps
+/// briefly so the cancellation token has a chance to fire between iterations.
+#[derive(Default)]
+struct CountingPreviewTool {
+    tiles: Arc<AtomicU32>,
+}
+
+#[async_trait]
+impl VideoTool for CountingPreviewTool {
+    async fn probe(&self, _path: &Path) -> Result<ProbeResult> {
+        Ok(ProbeResult {
+            duration_secs: Some(10.0),
+            width: Some(640),
+            height: Some(360),
+            codec: Some("h264".into()),
+        })
+    }
+    async fn thumbnail(&self, _src: &Path, _dst: &Path, _at_secs: f64, _width: u32) -> Result<()> {
+        Ok(())
+    }
+    async fn previews(
+        &self,
+        _src: &Path,
+        _dst: &Path,
+        _plan: &PreviewPlan,
+        _duration_secs: f64,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        for _ in 0..100 {
+            if cancel.is_cancelled() {
+                anyhow::bail!("cancelled");
+            }
+            self.tiles.fetch_add(1, Ordering::Relaxed);
+            // A short yield point so the token has a real chance to flip.
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn preview_loop_stops_after_cancellation() {
+    let (tmp, pool, clock, cfg) = setup().await;
+
+    // Seed a directory with one video + a probe+thumbnail+preview pipeline.
+    let videos = tmp.path().join("videos");
+    std::fs::create_dir_all(&videos).unwrap();
+    std::fs::write(videos.join("a.mp4"), b"x").unwrap();
+
+    add_dir(&pool, &clock, &videos, None).await.unwrap();
+    let cache = CachePaths::from_config(&cfg);
+    scanner::scan_all(&pool, &clock, &cache).await.unwrap();
+
+    let counter = Arc::new(AtomicU32::new(0));
+    let tool: VideoToolRef = Arc::new(CountingPreviewTool {
+        tiles: counter.clone(),
+    });
+    let registry = JobRegistry::new();
+    let workers = Workers {
+        pool: pool.clone(),
+        clock: clock.clone(),
+        config: Arc::new(cfg.clone()),
+        video_tool: tool,
+        thumb_dir: cache.thumb.clone(),
+        preview_dir: cache.preview.clone(),
+        registry: registry.clone(),
+    };
+    let _handles = workers.spawn_all(1, 1);
+
+    // Wait for the preview job to start (probe + thumb complete first; preview is registered).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let running: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE status = 'running' AND kind = 'preview'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if running == 1 {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("preview job never started");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // Let the preview loop tick a few times, then cancel.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let snapshot = counter.load(Ordering::Relaxed);
+    assert!(
+        snapshot >= 2,
+        "preview loop should have ticked at least twice; got {snapshot}"
+    );
+
+    let vid: String = sqlx::query_scalar("SELECT id FROM videos LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let aborted = registry.cancel_for_videos(&[VideoId(vid)]);
+    assert!(
+        !aborted.is_empty(),
+        "cancel should have matched at least one job"
+    );
+
+    // After cancellation, the counter should stabilize promptly. Observe that it
+    // does not grow unbounded.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let after_cancel = counter.load(Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let later = counter.load(Ordering::Relaxed);
+    assert!(
+        later <= after_cancel + 1,
+        "preview loop continued ticking after cancel: after_cancel={after_cancel} later={later}"
+    );
 }

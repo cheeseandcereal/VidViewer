@@ -7,6 +7,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::{anyhow, Context, Result};
 use sqlx::{Row, SqlitePool};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, Instrument};
 
 use crate::{
@@ -72,17 +73,25 @@ impl Workers {
                     span.in_scope(|| info!("job started"));
 
                     // Spawn the actual work as a separate task so we have an
-                    // `AbortHandle` to expose via the registry. Abort propagates
-                    // down to any awaited `tokio::process::Command::status()`,
-                    // and our `kill_on_drop(true)` ensures the ffmpeg/ffprobe
-                    // child is terminated as the future is dropped.
+                    // `AbortHandle` to expose via the registry. Abort interrupts
+                    // any currently-awaiting `.await` (e.g. Child::wait) and
+                    // `kill_on_drop(true)` SIGKILLs the ffmpeg child.
+                    //
+                    // The `CancellationToken` alongside it is a cooperative
+                    // flag polled between ffmpeg invocations inside
+                    // `VideoTool::previews`, so the preview loop stops spawning
+                    // more ffmpegs as soon as cancellation is signalled.
+                    let token = CancellationToken::new();
                     let w = self.clone();
                     let job_clone = job.clone();
+                    let token_for_task = token.clone();
                     let task: tokio::task::JoinHandle<Result<()>> = tokio::spawn(
-                        async move { w.process(&job_clone).await }.instrument(span.clone()),
+                        async move { w.process(&job_clone, &token_for_task).await }
+                            .instrument(span.clone()),
                     );
                     let abort = task.abort_handle();
-                    self.registry.register(job.id, job.video_id.clone(), abort);
+                    self.registry
+                        .register(job.id, job.video_id.clone(), abort, token);
 
                     let outcome = task.await;
                     self.registry.deregister(job.id);
@@ -177,11 +186,11 @@ impl Workers {
         }))
     }
 
-    async fn process(&self, job: &Job) -> Result<()> {
+    async fn process(&self, job: &Job, cancel: &CancellationToken) -> Result<()> {
         match job.kind {
             Kind::Probe => self.run_probe(&job.video_id).await,
             Kind::Thumbnail => self.run_thumbnail(&job.video_id).await,
-            Kind::Preview => self.run_preview(&job.video_id).await,
+            Kind::Preview => self.run_preview(&job.video_id, cancel).await,
         }
     }
 
@@ -254,7 +263,7 @@ impl Workers {
         Ok(())
     }
 
-    async fn run_preview(&self, video_id: &VideoId) -> Result<()> {
+    async fn run_preview(&self, video_id: &VideoId, cancel: &CancellationToken) -> Result<()> {
         let (abs_path, duration) = self.load_for_job(video_id).await?;
         let duration = duration.unwrap_or(0.0);
         if duration <= 0.0 {
@@ -283,7 +292,7 @@ impl Workers {
         );
 
         self.video_tool
-            .previews(&abs_path, &sheet_path, &plan, duration)
+            .previews(&abs_path, &sheet_path, &plan, duration, cancel)
             .await?;
 
         let updated_at_epoch = self.clock.now().timestamp();

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use crate::video_tool::{PreviewPlan, ProbeResult, VideoTool};
 
@@ -85,6 +86,7 @@ impl VideoTool for MockVideoTool {
         dst: &Path,
         plan: &PreviewPlan,
         duration_secs: f64,
+        _cancel: &CancellationToken,
     ) -> Result<()> {
         let mut st = self.inner.lock().unwrap();
         st.calls.push(MockCall::Preview {

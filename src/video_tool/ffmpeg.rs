@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::video_tool::{
@@ -95,11 +96,16 @@ impl VideoTool for FfmpegTool {
         dst: &Path,
         plan: &PreviewPlan,
         duration_secs: f64,
+        cancel: &CancellationToken,
     ) -> Result<()> {
         if plan.count == 0 {
             bail!("preview plan has zero count");
         }
         let _ = duration_secs; // retained in trait signature for compatibility
+
+        if cancel.is_cancelled() {
+            bail!("preview cancelled before start");
+        }
 
         if let Some(parent) = dst.parent() {
             tokio::fs::create_dir_all(parent)
@@ -120,9 +126,14 @@ impl VideoTool for FfmpegTool {
             .with_context(|| format!("creating scratch {}", scratch_dir.display()))?;
 
         // 1. Per-timestamp extraction, serial to keep memory bounded.
+        //    Check the cancellation token at the top of each iteration so we
+        //    don't spawn more ffmpegs after the job has been cancelled.
         let mut partial_tiles: u32 = 0;
         let mut last_successful_scratch: Option<PathBuf> = None;
         for (i, &t) in plan.timestamps.iter().enumerate() {
+            if cancel.is_cancelled() {
+                bail!("preview cancelled after {} tiles", i);
+            }
             let scratch_path = scratch_tile_path(&scratch_dir, i);
             let args = build_single_frame_command(
                 src,
@@ -131,7 +142,7 @@ impl VideoTool for FfmpegTool {
                 plan.tile_width,
                 plan.tile_height,
             );
-            let ok = run_ffmpeg_silent(&args)
+            let ok = run_ffmpeg_silent(&args, cancel)
                 .await
                 .with_context(|| format!("spawning ffmpeg for preview frame {i}"))?;
             if ok {
@@ -160,6 +171,9 @@ impl VideoTool for FfmpegTool {
                 if i + 1 >= plan.timestamps.len() {
                     bail!("preview extraction failed at tile 0 with no successor");
                 }
+                if cancel.is_cancelled() {
+                    bail!("preview cancelled before backfill");
+                }
                 let next_t = plan.timestamps[i + 1];
                 let args = build_single_frame_command(
                     src,
@@ -168,7 +182,7 @@ impl VideoTool for FfmpegTool {
                     plan.tile_width,
                     plan.tile_height,
                 );
-                let ok = run_ffmpeg_silent(&args)
+                let ok = run_ffmpeg_silent(&args, cancel)
                     .await
                     .with_context(|| "spawning ffmpeg for backfill preview frame")?;
                 if !ok {
@@ -187,10 +201,14 @@ impl VideoTool for FfmpegTool {
             );
         }
 
+        if cancel.is_cancelled() {
+            bail!("preview cancelled before tile pass");
+        }
+
         // 2. Tile pass.
         let tile_args =
             build_tile_from_scratch_command(&scratch_dir, dst, plan.cols, plan.rows, plan.count);
-        let ok = run_ffmpeg_silent(&tile_args)
+        let ok = run_ffmpeg_silent(&tile_args, cancel)
             .await
             .with_context(|| format!("spawning ffmpeg to tile preview sheet {}", dst.display()))?;
         if !ok {
@@ -300,14 +318,30 @@ impl Drop for ScratchDirGuard {
     }
 }
 
-async fn run_ffmpeg_silent(args: &[std::ffi::OsString]) -> Result<bool> {
-    let status = tokio::process::Command::new("ffmpeg")
+async fn run_ffmpeg_silent(
+    args: &[std::ffi::OsString],
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    // Spawn the child, then race its exit against the cancel token. If the
+    // token fires first, we drop the Child — combined with `kill_on_drop(true)`
+    // that sends SIGKILL and reaps the process.
+    let mut child = tokio::process::Command::new("ffmpeg")
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
-        .status()
-        .await
+        .spawn()
         .context("spawning ffmpeg")?;
-    Ok(status.success())
+
+    tokio::select! {
+        exit = child.wait() => {
+            let status = exit.context("awaiting ffmpeg")?;
+            Ok(status.success())
+        }
+        _ = cancel.cancelled() => {
+            // Dropping `child` here triggers kill_on_drop.
+            drop(child);
+            bail!("ffmpeg cancelled");
+        }
+    }
 }

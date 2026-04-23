@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 pub mod ffmpeg;
 mod ffprobe;
@@ -55,12 +56,19 @@ pub trait VideoTool: Send + Sync {
     async fn thumbnail(&self, src: &Path, dst: &Path, at_secs: f64, width: u32) -> Result<()>;
 
     /// Generate a tile-sheet JPEG at `dst` according to the plan.
+    ///
+    /// The `cancel` token is polled between per-timestamp ffmpeg invocations so
+    /// the loop stops spawning new ffmpegs promptly when a directory is
+    /// removed while this job is in flight. It is separate from, and
+    /// complementary to, tokio task abort (which interrupts whatever `.await`
+    /// is currently active).
     async fn previews(
         &self,
         src: &Path,
         dst: &Path,
         plan: &PreviewPlan,
         duration_secs: f64,
+        cancel: &CancellationToken,
     ) -> Result<()>;
 }
 
