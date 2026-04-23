@@ -6,7 +6,7 @@ This is the living task list for the MVP. Check items off as they land.
 
 - [x] **Step 0** — Documentation, tooling, conventions
   - `AGENTS.md`
-  - `rust-toolchain.toml`, `justfile`, `rustfmt.toml`, `clippy.toml`
+  - `justfile`, `rustfmt.toml`, `clippy.toml`
   - `docs/README.md` + design docs + agent playbooks
   - `docs/plan/mvp-build-order.md` + `docs/plan/deferred.md`
   - `migrations/README.md`

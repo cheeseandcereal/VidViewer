@@ -1,0 +1,70 @@
+[package]
+name = "vidviewer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+description = "Local-first video library browser with hover-scrub previews and external mpv playback"
+readme = "README.md"
+
+[[bin]]
+name = "vidviewer"
+path = "src/main.rs"
+
+[lib]
+name = "vidviewer"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+askama = "0.12"
+askama_axum = "0.4"
+axum = { version = "0.7", features = ["macros"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+futures = "0.3"
+mime = "0.3"
+percent-encoding = "2"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+    "migrate",
+    "chrono",
+] }
+thiserror = "1"
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "fs",
+    "process",
+    "signal",
+    "sync",
+    "time",
+    "net",
+    "io-util",
+] }
+tokio-util = { version = "0.7", features = ["io"] }
+toml = "0.8"
+tower-http = { version = "0.5", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+unicode-segmentation = "1"
+urlencoding = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = "symbols"

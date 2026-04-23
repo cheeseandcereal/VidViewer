@@ -12,7 +12,7 @@ Watch history and resume positions are captured via `mpv`'s JSON IPC.
 ## Platform and stack
 
 - **Target OS:** Linux only. Never add macOS or Windows support.
-- **Language:** Rust (stable; pinned via `rust-toolchain.toml`)
+- **Language:** Rust stable (MSRV 1.82, declared via `rust-version` in `Cargo.toml`)
 - **HTTP:** `axum` + `tower-http`
 - **Templates:** `askama` (compile-time checked)
 - **Database:** SQLite via `sqlx` (compile-time query checking in offline mode)
