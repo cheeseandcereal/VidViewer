@@ -36,6 +36,14 @@ impl Workers {
         general_concurrency: u32,
         preview_concurrency: u32,
     ) -> Vec<JoinHandle<()>> {
+        info!(
+            general_concurrency,
+            preview_concurrency,
+            thumbnail_width = self.thumbnail_width,
+            preview_min_interval = self.preview_min_interval,
+            preview_target_count = self.preview_target_count,
+            "starting job workers"
+        );
         let mut handles = Vec::new();
         for _ in 0..general_concurrency {
             let w = self.clone();
@@ -52,12 +60,38 @@ impl Workers {
         loop {
             match self.claim(lane).await {
                 Ok(Some(job)) => {
-                    if let Err(err) = self.process(&job).await {
-                        let msg = format!("{err:#}");
-                        error!(job_id = job.id, kind = %job.kind.as_str(), error = %msg, "job failed");
-                        let _ = self.mark(job.id, Status::Failed, Some(&msg)).await;
-                    } else {
-                        let _ = self.mark(job.id, Status::Done, None).await;
+                    let started = std::time::Instant::now();
+                    info!(
+                        job_id = job.id,
+                        kind = job.kind.as_str(),
+                        video_id = %job.video_id,
+                        "job started"
+                    );
+                    let result = self.process(&job).await;
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    match result {
+                        Ok(()) => {
+                            info!(
+                                job_id = job.id,
+                                kind = job.kind.as_str(),
+                                video_id = %job.video_id,
+                                elapsed_ms,
+                                "job done"
+                            );
+                            let _ = self.mark(job.id, Status::Done, None).await;
+                        }
+                        Err(err) => {
+                            let msg = format!("{err:#}");
+                            error!(
+                                job_id = job.id,
+                                kind = job.kind.as_str(),
+                                video_id = %job.video_id,
+                                elapsed_ms,
+                                error = %msg,
+                                "job failed"
+                            );
+                            let _ = self.mark(job.id, Status::Failed, Some(&msg)).await;
+                        }
                     }
                 }
                 Ok(None) => {
@@ -134,6 +168,7 @@ impl Workers {
 
     async fn run_probe(&self, video_id: &VideoId) -> Result<()> {
         let (abs_path, _duration) = self.load_for_job(video_id).await?;
+        info!(video_id = %video_id, path = %abs_path.display(), "probing video");
         let result = self.video_tool.probe(&abs_path).await?;
 
         let now_s = self.clock.now().to_rfc3339();
@@ -156,8 +191,17 @@ impl Workers {
         jobs::enqueue_on(&mut conn, Kind::Thumbnail, video_id).await?;
         if result.duration_secs.unwrap_or(0.0) > 0.0 {
             jobs::enqueue_on(&mut conn, Kind::Preview, video_id).await?;
+        } else {
+            info!(video_id = %video_id, "skipping preview enqueue: duration unknown or zero");
         }
-        info!(video_id = %video_id, duration = ?result.duration_secs, "probe complete");
+        info!(
+            video_id = %video_id,
+            duration_secs = ?result.duration_secs,
+            width = ?result.width,
+            height = ?result.height,
+            codec = ?result.codec,
+            "probe produced metadata"
+        );
         Ok(())
     }
 
@@ -171,6 +215,14 @@ impl Workers {
             _ => 5.0,
         };
         let dst = crate::config::thumb_cache_dir().join(format!("{}.jpg", video_id.as_str()));
+        info!(
+            video_id = %video_id,
+            path = %abs_path.display(),
+            at_secs = at,
+            width = self.thumbnail_width,
+            dst = %dst.display(),
+            "generating thumbnail"
+        );
         self.video_tool
             .thumbnail(&abs_path, &dst, at, self.thumbnail_width)
             .await?;
@@ -182,7 +234,6 @@ impl Workers {
             .execute(&self.pool)
             .await
             .context("marking thumbnail_ok")?;
-        info!(video_id = %video_id, "thumbnail complete");
         Ok(())
     }
 
@@ -203,6 +254,17 @@ impl Workers {
         let preview_dir = crate::config::preview_cache_dir();
         let sheet_path = preview_dir.join(format!("{}.jpg", video_id.as_str()));
         let vtt_path = preview_dir.join(format!("{}.vtt", video_id.as_str()));
+
+        info!(
+            video_id = %video_id,
+            path = %abs_path.display(),
+            duration_secs = duration,
+            previews = plan.count,
+            grid = format!("{}x{}", plan.cols, plan.rows),
+            tile_size = format!("{}x{}", plan.tile_width, plan.tile_height),
+            sheet = %sheet_path.display(),
+            "generating preview tile sheet"
+        );
 
         self.video_tool
             .previews(&abs_path, &sheet_path, &plan, duration)
@@ -225,7 +287,6 @@ impl Workers {
             .execute(&self.pool)
             .await
             .context("marking preview_ok")?;
-        info!(video_id = %video_id, "preview complete");
         Ok(())
     }
 

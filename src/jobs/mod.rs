@@ -65,7 +65,9 @@ pub async fn enqueue_on(
     .fetch_one(&mut *conn)
     .await
     .context("enqueueing job")?;
-    Ok(row.get(0))
+    let id: i64 = row.get(0);
+    tracing::debug!(job_id = id, kind = kind.as_str(), video_id = %video_id, "job enqueued");
+    Ok(id)
 }
 
 /// Convenience wrapper: enqueue against a pool.
