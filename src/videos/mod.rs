@@ -100,12 +100,18 @@ pub async fn get_detail(pool: &SqlitePool, id: &VideoId) -> Result<Option<VideoD
     };
 
     let coll_rows = sqlx::query(
-        "SELECT c.id, c.name, c.kind \
-         FROM collection_videos cv JOIN collections c ON c.id = cv.collection_id \
-         WHERE cv.video_id = ? AND c.hidden = 0 \
+        "SELECT c.id, c.name, c.kind FROM collections c \
+         WHERE c.hidden = 0 AND ( \
+           (c.kind = 'directory' AND c.directory_id = ?) \
+           OR (c.kind = 'custom' AND EXISTS ( \
+                SELECT 1 FROM collection_directories cd \
+                WHERE cd.collection_id = c.id AND cd.directory_id = ? \
+           )) \
+         ) \
          ORDER BY c.kind, c.name COLLATE NOCASE",
     )
-    .bind(id.as_str())
+    .bind(video.directory_id.raw())
+    .bind(video.directory_id.raw())
     .fetch_all(pool)
     .await
     .context("collections for video")?;

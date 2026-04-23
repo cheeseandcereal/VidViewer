@@ -166,18 +166,10 @@ async fn hard_remove_deletes_all_state() {
         .await
         .unwrap();
 
-    // Add this video to a custom collection.
-    let custom = crate::collections::create_custom(&pool, &clock, "Favorites")
+    // Include this directory in a custom collection.
+    let _custom = crate::collections::create_custom(&pool, &clock, "Favorites", &[dir.id])
         .await
         .unwrap();
-    crate::collections::add_video(
-        &pool,
-        &clock,
-        custom.id,
-        &crate::ids::VideoId(video_id.clone()),
-    )
-    .await
-    .unwrap();
 
     // Write fake cache files on disk + a watch_history row.
     std::fs::create_dir_all(&cache.thumb).unwrap();
@@ -221,9 +213,9 @@ async fn hard_remove_deletes_all_state() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    let count_custom_coll_memberships: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM collection_videos cv \
-             JOIN collections c ON c.id = cv.collection_id \
+    let count_custom_coll_dir_refs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM collection_directories cd \
+             JOIN collections c ON c.id = cd.collection_id \
              WHERE c.kind = 'custom'",
     )
     .fetch_one(&pool)
@@ -234,8 +226,8 @@ async fn hard_remove_deletes_all_state() {
     assert_eq!(count_history, 0);
     assert_eq!(count_dir_colls, 0);
     assert_eq!(
-        count_custom_coll_memberships, 0,
-        "custom membership rows cascade-deleted"
+        count_custom_coll_dir_refs, 0,
+        "custom collection_directories rows cascade-deleted"
     );
 
     // Custom collection itself survives.
@@ -245,6 +237,9 @@ async fn hard_remove_deletes_all_state() {
             .await
             .unwrap();
     assert_eq!(count_custom_colls, 1);
+
+    // suppress unused warning — we only care above that the video id existed.
+    let _ = video_id;
 
     // Cache files are gone.
     assert!(!thumb.exists());

@@ -114,11 +114,11 @@ async fn detects_change_and_missing() {
     assert_eq!(report.changed_videos, 1);
     assert_eq!(report.missing_videos, 1);
 
-    // Directory collection should have only the live video.
+    // Directory collection should list only the live video on read.
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM collection_videos cv \
-             JOIN collections c ON c.id = cv.collection_id \
-             WHERE c.kind = 'directory'",
+        "SELECT COUNT(*) FROM videos v \
+             JOIN collections c ON c.kind = 'directory' AND c.directory_id = v.directory_id \
+             WHERE v.missing = 0",
     )
     .fetch_one(&pool)
     .await
