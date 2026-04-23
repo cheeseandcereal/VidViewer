@@ -11,6 +11,7 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::state::AppState;
 
+pub mod api;
 pub mod pages;
 
 pub async fn serve(state: AppState) -> Result<()> {
@@ -37,6 +38,16 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", axum::routing::get(healthz))
         .route("/", axum::routing::get(pages::home))
+        .route("/settings", axum::routing::get(pages::settings))
+        .route(
+            "/api/directories",
+            axum::routing::get(api::list_directories).post(api::add_directory),
+        )
+        .route(
+            "/api/directories/:id",
+            axum::routing::patch(api::patch_directory).delete(api::delete_directory),
+        )
+        .route("/api/fs/list", axum::routing::get(api::fs_list))
         .nest_service("/static", static_dir)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

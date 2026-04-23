@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}Settings — VidViewer{% endblock %}
+
+{% block content %}
+<h1>Settings</h1>
+
+<section class="card">
+  <div class="row between">
+    <h2>Directories</h2>
+    <button class="primary" type="button" id="btn-add-dir">+ Add Directory</button>
+  </div>
+
+  {% if directories.is_empty() %}
+    <p class="muted">No directories configured. Add one to get started.</p>
+  {% else %}
+    <table class="dirs">
+      <thead>
+        <tr><th>Label</th><th>Path</th><th>Videos</th><th>Status</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for d in directories %}
+        <tr data-dir-id="{{ d.id }}">
+          <td>
+            <span class="label-text">{{ d.label }}</span>
+            <button type="button" class="link btn-rename">rename</button>
+          </td>
+          <td class="mono">{{ d.path }}</td>
+          <td>{{ d.video_count }}</td>
+          <td>
+            {% if d.removed %}
+              <span class="badge danger">removed</span>
+            {% else %}
+              <span class="badge ok">active</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if !d.removed %}
+              <button type="button" class="danger btn-remove">Remove</button>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+
+<section class="card" id="picker-modal" hidden>
+  <h2>Pick a directory</h2>
+  <div class="row">
+    <button type="button" id="picker-up">↑ Up</button>
+    <button type="button" id="picker-home">🏠 Home</button>
+    <input type="text" id="picker-path" class="mono grow" placeholder="/absolute/path">
+    <button type="button" id="picker-go">Go</button>
+  </div>
+  <ul id="picker-entries" class="picker-entries"></ul>
+  <div class="row">
+    <input type="text" id="picker-label" placeholder="Optional label" class="grow">
+    <button type="button" id="picker-add" class="primary">Add selected</button>
+    <button type="button" id="picker-cancel">Cancel</button>
+  </div>
+  <p class="muted picker-status" id="picker-status"></p>
+</section>
+
+<section class="card">
+  <h2>Runtime</h2>
+  <dl class="kv">
+    <dt>Port</dt><dd>{{ port }}</dd>
+    <dt>Player</dt><dd class="mono">{{ player }}</dd>
+    <dt>Database</dt><dd class="mono">{{ db_path }}</dd>
+    <dt>Thumb cache</dt><dd class="mono">{{ thumb_dir }}</dd>
+    <dt>Preview cache</dt><dd class="mono">{{ preview_dir }}</dd>
+  </dl>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/settings.js" defer></script>
+{% endblock %}

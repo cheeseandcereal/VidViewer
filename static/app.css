@@ -125,4 +125,104 @@ button.danger, .button.danger {
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: var(--space-3);
+    margin-bottom: var(--space-3);
 }
+
+.row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-2);
+}
+
+.row.between { justify-content: space-between; }
+
+.grow { flex: 1; }
+
+.mono { font-family: var(--font-mono); font-size: 13px; }
+
+input[type="text"] {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    font: inherit;
+}
+
+table.dirs {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: var(--space-2);
+}
+
+table.dirs th, table.dirs td {
+    text-align: left;
+    padding: var(--space-2);
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+}
+
+table.dirs th {
+    color: var(--text-dim);
+    font-weight: 500;
+    font-size: 13px;
+}
+
+.link {
+    appearance: none;
+    background: transparent;
+    border: none;
+    color: var(--accent);
+    padding: 0 var(--space-1);
+    cursor: pointer;
+    font: inherit;
+}
+.link:hover { text-decoration: underline; }
+
+.badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+}
+.badge.ok { color: var(--ok); border-color: var(--ok); }
+.badge.danger { color: var(--danger); border-color: var(--danger); }
+
+.kv {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--space-1) var(--space-3);
+    margin: 0;
+}
+.kv dt { color: var(--text-dim); }
+.kv dd { margin: 0; }
+
+.picker-entries {
+    list-style: none;
+    margin: var(--space-2) 0;
+    padding: 0;
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+}
+
+.picker-entries li {
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+}
+
+.picker-entries li:last-child { border-bottom: none; }
+.picker-entries li:hover { background: var(--surface-2); }
+.picker-entries li.selected { background: var(--surface-2); outline: 1px solid var(--accent); }
+.picker-entries li.disabled { color: var(--text-dim); cursor: not-allowed; }
+
+.picker-status { min-height: 1em; }
