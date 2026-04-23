@@ -1,0 +1,12 @@
+/target
+Cargo.lock.bak
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# App state (should never be committed)
+/data/
+/cache/
