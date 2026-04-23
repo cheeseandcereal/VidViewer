@@ -1,13 +1,15 @@
 # Deferred features
 
-Last updated: 2026-04-22
-
 Ideas out of MVP scope. Add to this file whenever a useful idea comes up during implementation.
 
 ## Features
 
+- **Playlists** — a per-video-curated list, distinct from custom collections.
+  Collections are sets of directories that auto-update with the scanner;
+  playlists would let the user hand-pick individual videos and reorder them.
+  Would reintroduce something like the old `collection_videos` table but
+  scoped to an explicit "playlist" kind.
 - **Search** across collections (by filename and, later, by extracted metadata).
-- **Manual ordering** inside custom collections (using the `position` column).
 - **Tags** and **smart collections** (rule-based).
 - **Rename detection** — match a new file to a missing one by `(size, mtime)` before treating
   as a new video, to preserve watch history across moves.
