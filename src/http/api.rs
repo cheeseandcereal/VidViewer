@@ -18,7 +18,7 @@ use crate::{
     collections, directories, fs_browse, history,
     http::error::{bad_request, ApiError},
     ids::{CollectionId, DirectoryId, VideoId},
-    player, scanner,
+    jobs, player, scanner,
     state::AppState,
     ui_state, videos,
 };
@@ -242,6 +242,27 @@ pub async fn start_scan(
     State(state): State<AppState>,
     Query(q): Query<ScanReq>,
 ) -> Result<Response, ApiError> {
+    // Run the stuck-job watchdog ad-hoc before spawning the scan. If a probe
+    // row was stranded in `running` (the partial unique index prevents a new
+    // probe from being enqueued for the same (kind, video_id) until the row
+    // is cleared), a manual rescan is the user's natural "please retry" —
+    // unsticking those rows now means the rescan's re-enqueues actually land
+    // instead of silently no-oping.
+    //
+    // The threshold here is even tighter than the periodic pass: a manual
+    // rescan implies a deliberate wait for things to settle, so we're only
+    // sparing the microsecond claim/register race window.
+    if let Err(err) = jobs::reset_stuck_running(
+        &state.pool,
+        &state.clock,
+        &state.job_registry,
+        chrono::Duration::seconds(5),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "ad-hoc watchdog pass before scan failed");
+    }
+
     let only = q.dir_id.map(DirectoryId);
     let cache = scanner::CachePaths::from_config(&state.config);
     let handle = match only {

@@ -9,7 +9,7 @@ use crate::{
     directories::{add as add_dir, soft_remove},
     jobs::{
         counts::count_by_status, enqueue_on, reconcile::reconcile_on_startup,
-        registry::JobRegistry, worker::Workers, Kind,
+        registry::JobRegistry, reset_stuck_running, worker::Workers, Kind,
     },
     video_tool::{MockVideoTool, VideoToolRef},
 };
@@ -300,4 +300,38 @@ async fn watchdog_respects_age_threshold() {
         .await
         .unwrap();
     assert_eq!(reset, 0, "fresh running job must not be touched");
+}
+
+/// Exercises the free `reset_stuck_running` used by the ad-hoc scan path with
+/// a short threshold, to confirm the threshold is honored end-to-end.
+#[tokio::test]
+async fn ad_hoc_reset_with_short_threshold_unsticks_jobs_quickly() {
+    let (tmp, pool) = setup().await;
+    let clock = clock::system();
+    let a = tmp.path().join("a");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::write(a.join("x.mp4"), b"x").unwrap();
+    add_dir(&pool, &clock, &a, None).await.unwrap();
+    let cache = test_cache(tmp.path());
+    crate::scanner::scan_all(&pool, &clock, &cache)
+        .await
+        .unwrap();
+
+    // A probe row stuck in `running` 30 seconds ago, not tracked.
+    let stale = (clock.now() - chrono::Duration::seconds(30)).to_rfc3339();
+    sqlx::query("UPDATE jobs SET status = 'running', updated_at = ?")
+        .bind(&stale)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // A 5-second threshold catches it (30s old > 5s threshold).
+    let registry = JobRegistry::new();
+    let reset = reset_stuck_running(&pool, &clock, &registry, chrono::Duration::seconds(5))
+        .await
+        .unwrap();
+    assert_eq!(reset, 1);
+    let (pending, running, _, _) = count_by_status(&pool).await.unwrap();
+    assert_eq!(pending, 1);
+    assert_eq!(running, 0);
 }

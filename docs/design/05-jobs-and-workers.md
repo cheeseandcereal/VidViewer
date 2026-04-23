@@ -45,22 +45,32 @@ Separating preview generation prevents long tile-sheet encodes from starving qui
 
 ## Stuck-job watchdog
 
-In addition to startup reconciliation, a periodic watchdog task runs while
-workers are alive. It finds rows in `running` whose id is not tracked by the
-`JobRegistry` **and** whose `updated_at` is older than a safety threshold
-(5 minutes), and resets them to `pending` so a worker can re-claim them.
+In addition to startup reconciliation, a watchdog runs alongside the workers
+to rescue rows that have been stranded in `running` after their worker task
+disappeared (DB write failure, panic, external process signal, etc.).
+Without the watchdog, such a row would stay `running` forever and the
+partial unique index on outstanding jobs would block every future enqueue
+for that `(kind, video_id)` pair, so rescans would appear to silently "do
+nothing" for the affected video.
 
-This is a safety net for any edge case where a worker task disappears
-without transitioning the DB row — a DB write failure, a panic between
-`task.await` and the match arm, an external process signal, etc. Without
-the watchdog, such a row would stay `running` forever and the partial
-unique index on outstanding jobs would block every future enqueue for
-that `(kind, video_id)` pair. Rescans would appear to "do nothing" for the
-affected video.
+The detection rule has two parts: the row must be `running`, must be older
+than a small age threshold, **and** its id must not be present in the
+`JobRegistry`. The registry check is the source of truth for "is a task
+still alive behind this row" — a long-running ffmpeg invocation is fine
+because it stays registered. The age threshold only covers the tiny
+claim/register race window where `claim()` has already transitioned the row
+to `running` but `registry.register(...)` hasn't run yet — a few
+synchronous microseconds, no `.await` between them.
 
-The registry check is the source of truth: a long-running ffmpeg invocation
-is fine, since its task is still tracked. Only orphaned rows with no live
-task behind them are reset.
+The watchdog fires in two ways:
+
+- **Periodic** (every 30 seconds, threshold 30 seconds). A background task
+  spawned alongside the worker lanes.
+- **Ad-hoc on manual scan** (threshold 5 seconds). `POST /api/scan` runs
+  a watchdog pass before spawning the scanner. This turns a user's manual
+  rescan into an explicit "please retry" — any stuck probe is unsticked
+  immediately so the scanner's re-enqueues actually land, instead of
+  silently no-opping against a stale `running` row.
 
 ## Cancellation
 

@@ -14,12 +14,14 @@ pub mod reconcile;
 pub mod registry;
 #[cfg(test)]
 mod tests;
+pub mod watchdog;
 pub mod worker;
 
 pub use counts::{
     count_by_status, counts, counts_by_directory, DirectoryJobCounts, JobCounts, KindCounts,
 };
 pub use reconcile::{reconcile_on_startup, ReconcileReport};
+pub use watchdog::reset_stuck_running;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {

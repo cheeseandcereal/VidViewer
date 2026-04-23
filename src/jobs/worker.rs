@@ -173,22 +173,26 @@ impl Workers {
     /// runs are fine; they just don't touch `updated_at`). A row is only
     /// considered stuck if its id is not in the registry AND its `updated_at`
     /// is older than `STUCK_AFTER` — the age threshold guards against the
-    /// claim/register race window where the row exists before the registry
-    /// entry does.
+    /// tiny claim/register race window where the row exists in `running`
+    /// before the registry entry does (synchronous microseconds between
+    /// `claim()` returning and `registry.register(...)`).
     async fn run_stuck_watchdog(self) {
-        // Tune this if you add a long-running job kind. Probe is ~sub-second,
-        // thumbnail is a few seconds, preview is a few seconds to a minute
-        // depending on preview count and video length. 5 minutes is well clear
-        // of all realistic runtimes.
-        const STUCK_AFTER: chrono::Duration = chrono::Duration::minutes(5);
-        const POLL_INTERVAL: Duration = Duration::from_secs(60);
+        // The race window between claim() returning and registry.register()
+        // is a handful of synchronous microseconds — no `.await` between
+        // them. 30 seconds is ~6 orders of magnitude of headroom and still
+        // reacts quickly to real strandings.
+        const STUCK_AFTER: chrono::Duration = chrono::Duration::seconds(30);
+        const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
         // Wait one tick before the first check so startup reconcile has a
         // chance to run and workers have a chance to pick up real work.
         tokio::time::sleep(POLL_INTERVAL).await;
 
         loop {
-            if let Err(err) = self.reset_stuck_running(STUCK_AFTER).await {
+            if let Err(err) =
+                jobs::reset_stuck_running(&self.pool, &self.clock, &self.registry, STUCK_AFTER)
+                    .await
+            {
                 tracing::warn!(error = %err, "stuck-job watchdog pass failed");
             }
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -198,56 +202,9 @@ impl Workers {
     /// Find `running` rows older than `threshold` whose id is not tracked by
     /// the live registry and reset them to `pending`. Returns the number of
     /// rows reset (for tests and observability).
+    #[cfg(test)]
     pub(crate) async fn reset_stuck_running(&self, threshold: chrono::Duration) -> Result<u64> {
-        let cutoff = (self.clock.now() - threshold).to_rfc3339();
-        let rows = sqlx::query(
-            "SELECT id, kind, video_id FROM jobs \
-             WHERE status = 'running' AND updated_at < ?",
-        )
-        .bind(&cutoff)
-        .fetch_all(&self.pool)
-        .await
-        .context("listing stuck running jobs")?;
-
-        let mut reset_ids: Vec<i64> = Vec::new();
-        for row in &rows {
-            let id: i64 = row.get("id");
-            if self.registry.contains(id) {
-                // A live worker task is still executing this job; leave it
-                // alone no matter how old `updated_at` is.
-                continue;
-            }
-            reset_ids.push(id);
-        }
-
-        if reset_ids.is_empty() {
-            return Ok(0);
-        }
-
-        let now_s = self.clock.now().to_rfc3339();
-        let placeholders = vec!["?"; reset_ids.len()].join(",");
-        let sql = format!(
-            "UPDATE jobs SET status = 'pending', updated_at = ? \
-             WHERE status = 'running' AND id IN ({placeholders})"
-        );
-        let mut q = sqlx::query(&sql).bind(&now_s);
-        for id in &reset_ids {
-            q = q.bind(id);
-        }
-        let affected = q
-            .execute(&self.pool)
-            .await
-            .context("resetting stuck running jobs")?
-            .rows_affected();
-
-        if affected > 0 {
-            tracing::warn!(
-                reset = affected,
-                ids = ?reset_ids,
-                "watchdog reset stuck running jobs to pending"
-            );
-        }
-        Ok(affected)
+        jobs::reset_stuck_running(&self.pool, &self.clock, &self.registry, threshold).await
     }
 
     async fn claim(&self, lane: Lane) -> Result<Option<Job>> {
