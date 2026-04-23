@@ -17,7 +17,8 @@ Both live under `~/.local/share/vidviewer/cache/`.
 ffmpeg -ss <T> -i <abs_path> -vframes 1 -vf scale=<thumbnail_width>:-1 <cache>/thumbs/<video_id>.jpg
 ```
 
-- `T = min(5s, duration_secs * 0.1)`; seek before input for speed.
+- `T = duration_secs * 0.5` (midpoint of the video). Falls back to `5s` if the duration is
+  unknown. Seek before input for speed.
 - `thumbnail_width` from config (default 320).
 - On success, set `videos.thumbnail_ok = 1`.
 

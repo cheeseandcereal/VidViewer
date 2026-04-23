@@ -163,8 +163,11 @@ impl Workers {
 
     async fn run_thumbnail(&self, video_id: &VideoId) -> Result<()> {
         let (abs_path, duration) = self.load_for_job(video_id).await?;
+        // Use the midpoint of the video for the poster frame. If duration is unknown
+        // or zero, fall back to 5 seconds in (a safe default that skips intros/logos
+        // on most clips).
         let at = match duration {
-            Some(d) if d > 0.0 => (d * 0.1).min(5.0),
+            Some(d) if d > 0.0 => d * 0.5,
             _ => 5.0,
         };
         let dst = crate::config::thumb_cache_dir().join(format!("{}.jpg", video_id.as_str()));
