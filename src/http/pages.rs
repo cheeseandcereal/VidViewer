@@ -2,15 +2,17 @@
 
 use askama::Template;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
 };
+use serde::Deserialize;
 
 use crate::{
     collections::{self, Collection, CollectionSummary, VideoCard},
     directories, ids,
     state::AppState,
+    videos::{self, DetailCollection, Video, WatchHistoryRow},
 };
 
 mod filters {
@@ -88,6 +90,112 @@ struct SettingsTemplate {
     db_path: String,
     thumb_dir: String,
     preview_dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DetailQuery {
+    pub cid: Option<i64>,
+}
+
+#[derive(Template)]
+#[template(path = "video_detail.html")]
+struct VideoDetailTemplate {
+    video: Video,
+    title: String,
+    directory_label: String,
+    size_label: String,
+    history: Option<WatchHistoryRow>,
+    has_resume: bool,
+    resume_pretty: String,
+    last_watched_pretty: String,
+    collections: Vec<DetailCollection>,
+    updated_at_epoch: i64,
+    from_cid: Option<String>,
+}
+
+pub async fn video_detail_page(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<DetailQuery>,
+) -> Response {
+    let vid = ids::VideoId(id);
+    let Some(detail) = (match videos::get_detail(&state.pool, &vid).await {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!(error = %err, "video detail");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+        }
+    }) else {
+        return (StatusCode::NOT_FOUND, "video not found").into_response();
+    };
+
+    let title = match detail.video.filename.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+        _ => detail.video.filename.clone(),
+    };
+    let size_label = humanize_bytes(detail.video.size_bytes);
+    let has_resume = detail
+        .history
+        .as_ref()
+        .map(|h| !h.completed && h.position_secs > 0.5)
+        .unwrap_or(false);
+    let resume_pretty = detail
+        .history
+        .as_ref()
+        .map(|h| format_hms(h.position_secs))
+        .unwrap_or_default();
+    let last_watched_pretty = detail
+        .history
+        .as_ref()
+        .map(|h| {
+            h.last_watched_at
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string()
+        })
+        .unwrap_or_default();
+    let updated_at_epoch = detail.video.updated_at.timestamp();
+
+    render(VideoDetailTemplate {
+        video: detail.video,
+        title,
+        directory_label: detail.directory_label,
+        size_label,
+        history: detail.history,
+        has_resume,
+        resume_pretty,
+        last_watched_pretty,
+        collections: detail.collections,
+        updated_at_epoch,
+        from_cid: q.cid.map(|n| n.to_string()),
+    })
+}
+
+fn humanize_bytes(bytes: i64) -> String {
+    let b = bytes as f64;
+    let kib = 1024.0_f64;
+    let mib = kib * 1024.0;
+    let gib = mib * 1024.0;
+    if b >= gib {
+        format!("{:.2} GiB", b / gib)
+    } else if b >= mib {
+        format!("{:.2} MiB", b / mib)
+    } else if b >= kib {
+        format!("{:.1} KiB", b / kib)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+fn format_hms(secs: f64) -> String {
+    let total = secs.max(0.0).round() as u64;
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 pub async fn settings(State(state): State<AppState>) -> Response {

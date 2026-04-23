@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} — VidViewer{% endblock %}
+
+{% block content %}
+<section class="video-detail">
+  <div class="detail-poster hover-scrub"
+       data-video-id="{{ video.id }}"
+       data-preview-ok="{% if video.preview_ok %}1{% else %}0{% endif %}"
+       data-duration="{{ video.duration_secs.unwrap_or(0.0) }}"
+       data-cache-bust="{{ updated_at_epoch }}">
+    {% if video.thumbnail_ok %}
+      <img class="poster" src="/thumbs/{{ video.id }}.jpg?v={{ updated_at_epoch }}" alt="">
+    {% else %}
+      <div class="thumb-placeholder"></div>
+    {% endif %}
+    {% if video.duration_secs.is_some() %}
+      <span class="duration-badge">{{ video.duration_secs|duration }}</span>
+    {% endif %}
+    {% if video.missing %}
+      <span class="missing-badge">missing</span>
+    {% endif %}
+  </div>
+
+  <div class="detail-side">
+    <h1 class="detail-title" title="{{ video.filename }}">{{ title }}</h1>
+
+    <div class="actions">
+      <button type="button" id="btn-play" class="primary"
+              {% if video.missing %}disabled{% endif %}>▶ Play</button>
+      {% if has_resume %}
+        <button type="button" id="btn-resume"
+                {% if video.missing %}disabled{% endif %}>↻ Resume at {{ resume_pretty }}</button>
+      {% endif %}
+      {% if from_cid.is_some() %}
+        <button type="button" id="btn-reroll">🎲 Re-roll</button>
+      {% endif %}
+      <button type="button" id="btn-add-to">＋ Add to collection…</button>
+    </div>
+
+    <dl class="kv detail-meta">
+      <dt>Duration</dt><dd>{% if video.duration_secs.is_some() %}{{ video.duration_secs|duration }}{% else %}—{% endif %}</dd>
+      <dt>Resolution</dt>
+      <dd>{% match video.width %}{% when Some with (w) %}{% if video.height.is_some() %}{{ w }}×{{ video.height.unwrap() }}{% else %}{{ w }}{% endif %}{% when None %}—{% endmatch %}</dd>
+      <dt>Codec</dt><dd>{% if video.codec.is_some() %}{{ video.codec.as_ref().unwrap() }}{% else %}—{% endif %}</dd>
+      <dt>Size</dt><dd>{{ size_label }}</dd>
+      <dt>Directory</dt><dd>{{ directory_label }}</dd>
+      <dt>Path</dt><dd class="mono">{{ video.relative_path }}</dd>
+      {% if history.is_some() %}
+      <dt>Last watched</dt><dd>{{ last_watched_pretty }}</dd>
+      <dt>Watch count</dt><dd>{{ history.as_ref().unwrap().watch_count }}</dd>
+      {% if history.as_ref().unwrap().completed %}
+      <dt>Status</dt><dd class="muted">Completed</dd>
+      {% endif %}
+      {% endif %}
+    </dl>
+
+    {% if !collections.is_empty() %}
+    <div class="chip-row">
+      {% for c in collections %}
+        <a class="chip" href="/collections/{{ c.id }}">{{ c.name }}</a>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/hover_scrub.js" defer></script>
+<script>
+  window.VIDEO_DETAIL = {
+    video_id: "{{ video.id }}",
+    from_cid: {% if from_cid.is_some() %}"{{ from_cid.as_ref().unwrap() }}"{% else %}null{% endif %},
+    resume_secs: {% if history.is_some() %}{{ history.as_ref().unwrap().position_secs }}{% else %}0{% endif %},
+  };
+</script>
+<script src="/static/video_detail.js" defer></script>
+{% endblock %}
