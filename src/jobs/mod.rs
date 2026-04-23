@@ -96,3 +96,65 @@ pub async fn count_by_status(pool: &SqlitePool) -> Result<(i64, i64, i64, i64)> 
     }
     Ok((pending, running, done, failed))
 }
+
+/// Per-kind job counts.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct KindCounts {
+    pub pending: i64,
+    pub running: i64,
+    pub done: i64,
+    pub failed: i64,
+}
+
+impl KindCounts {
+    pub fn total_incomplete(&self) -> i64 {
+        self.pending + self.running
+    }
+    pub fn total(&self) -> i64 {
+        self.pending + self.running + self.done + self.failed
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct JobCounts {
+    pub probe: KindCounts,
+    pub thumbnail: KindCounts,
+    pub preview: KindCounts,
+}
+
+impl JobCounts {
+    /// True when any kind still has incomplete (pending/running) jobs.
+    pub fn any_incomplete(&self) -> bool {
+        self.probe.total_incomplete() > 0
+            || self.thumbnail.total_incomplete() > 0
+            || self.preview.total_incomplete() > 0
+    }
+}
+
+/// Load per-kind job counts (breakdown by status).
+pub async fn counts(pool: &SqlitePool) -> Result<JobCounts> {
+    let rows = sqlx::query("SELECT kind, status, COUNT(*) AS n FROM jobs GROUP BY kind, status")
+        .fetch_all(pool)
+        .await
+        .context("counting jobs by kind+status")?;
+    let mut out = JobCounts::default();
+    for row in rows {
+        let kind: String = row.get("kind");
+        let status: String = row.get("status");
+        let n: i64 = row.get("n");
+        let bucket = match kind.as_str() {
+            "probe" => &mut out.probe,
+            "thumbnail" => &mut out.thumbnail,
+            "preview" => &mut out.preview,
+            _ => continue,
+        };
+        match status.as_str() {
+            "pending" => bucket.pending = n,
+            "running" => bucket.running = n,
+            "done" => bucket.done = n,
+            "failed" => bucket.failed = n,
+            _ => {}
+        }
+    }
+    Ok(out)
+}

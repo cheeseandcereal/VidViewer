@@ -465,4 +465,25 @@ table.dirs th {
 .progress-fill {
     height: 100%;
     background: var(--accent);
+    transition: width 200ms ease;
 }
+
+.jobs-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: var(--space-3);
+    margin-top: var(--space-2);
+}
+.job-stat .job-label {
+    font-weight: 500;
+    margin-bottom: var(--space-1);
+}
+.job-stat .progress-bar {
+    max-width: none;
+    height: 6px;
+}
+.job-counts {
+    margin-top: var(--space-1);
+    font-variant-numeric: tabular-nums;
+}
+.job-counts .failed { color: var(--danger); }

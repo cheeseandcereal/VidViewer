@@ -41,7 +41,15 @@ pub async fn add_directory(
 ) -> Response {
     let path = PathBuf::from(&req.path);
     match directories::add(&state.pool, &state.clock, &path, req.label).await {
-        Ok(dir) => (StatusCode::CREATED, Json(dir)).into_response(),
+        Ok(dir) => {
+            // Immediately kick off a scan for the newly-added directory.
+            let handle = scanner::spawn_one(state.pool.clone(), state.clock.clone(), dir.id);
+            {
+                let mut reg = state.scans.write().await;
+                reg.current = Some(handle);
+            }
+            (StatusCode::CREATED, Json(dir)).into_response()
+        }
         Err(err) => add_error_response(err),
     }
 }
@@ -134,25 +142,43 @@ pub async fn start_scan(State(state): State<AppState>, Query(q): Query<ScanReq>)
 }
 
 pub async fn scan_status(State(state): State<AppState>) -> Response {
-    let reg = state.scans.read().await;
-    let Some(handle) = &reg.current else {
-        return Json(serde_json::json!({"phase": "idle"})).into_response();
+    let (phase, files_seen, new_videos, changed_videos, missing_videos, error) = {
+        let reg = state.scans.read().await;
+        match &reg.current {
+            Some(handle) => {
+                let p = &handle.progress;
+                let phase = match p.phase.load(std::sync::atomic::Ordering::SeqCst) {
+                    0 => "walking",
+                    1 => "done",
+                    2 => "failed",
+                    _ => "unknown",
+                };
+                let err = p.error.lock().unwrap().clone();
+                (
+                    phase,
+                    p.files_seen.load(std::sync::atomic::Ordering::Relaxed),
+                    p.new_videos.load(std::sync::atomic::Ordering::Relaxed),
+                    p.changed_videos.load(std::sync::atomic::Ordering::Relaxed),
+                    p.missing_videos.load(std::sync::atomic::Ordering::Relaxed),
+                    err,
+                )
+            }
+            None => ("idle", 0, 0, 0, 0, None),
+        }
     };
-    let p = &handle.progress;
-    let phase = match p.phase.load(std::sync::atomic::Ordering::SeqCst) {
-        0 => "walking",
-        1 => "done",
-        2 => "failed",
-        _ => "unknown",
-    };
-    let error = p.error.lock().unwrap().clone();
+
+    let jobs_counts = crate::jobs::counts(&state.pool).await.unwrap_or_default();
+    let busy = phase == "walking" || jobs_counts.any_incomplete();
+
     Json(serde_json::json!({
         "phase": phase,
-        "files_seen": p.files_seen.load(std::sync::atomic::Ordering::Relaxed),
-        "new_videos": p.new_videos.load(std::sync::atomic::Ordering::Relaxed),
-        "changed_videos": p.changed_videos.load(std::sync::atomic::Ordering::Relaxed),
-        "missing_videos": p.missing_videos.load(std::sync::atomic::Ordering::Relaxed),
+        "files_seen": files_seen,
+        "new_videos": new_videos,
+        "changed_videos": changed_videos,
+        "missing_videos": missing_videos,
         "error": error,
+        "jobs": jobs_counts,
+        "busy": busy,
     }))
     .into_response()
 }
