@@ -77,6 +77,12 @@ CREATE TABLE jobs (
 );
 CREATE INDEX idx_jobs_status ON jobs(status);
 
+-- At most one outstanding (pending or running) job per (kind, video_id). This is
+-- the DB-level backstop for the idempotent enqueue path in src/jobs/mod.rs.
+CREATE UNIQUE INDEX idx_jobs_outstanding_unique
+    ON jobs(kind, video_id)
+    WHERE status IN ('pending', 'running');
+
 CREATE TABLE ui_state (
     id                INTEGER PRIMARY KEY CHECK (id = 1),
     last_browsed_path TEXT
