@@ -27,12 +27,18 @@ For each directory with `removed = 0`:
      - Insert `collection_videos` row for the directory's collection.
      - Enqueue `probe` job. `thumbnail` and `preview` jobs are enqueued when `probe` completes
        (they need `duration_secs`).
-   - Else if `(size_bytes, mtime_unix)` changed:
+   - Else if `(size_bytes, mtime_unix)` changed (content on disk differs from the stored row):
      - Update the existing row. Clear `thumbnail_ok`, `preview_ok`.
      - Enqueue `probe` job.
-     - If previously `missing = 1`, clear the flag and re-insert the `collection_videos` row.
-   - Else:
-     - Remove `relative_path` from the map (marker for "still present") and skip.
+     - If previously `missing = 1`, also re-insert the `collection_videos` row.
+   - Else if `missing = 1` (stat matches but the row was flagged missing, e.g. because
+     the directory was previously soft-removed):
+     - Set `missing = 0` and touch `updated_at`.
+     - Re-insert the `collection_videos` row for the directory collection.
+     - **Preserve** `thumbnail_ok` / `preview_ok`. Do not enqueue probe. The cache
+       verification pass below will detect any missing cache files and re-enqueue
+       only what's actually needed.
+   - Else (truly unchanged): no-op.
 4. For entries remaining in the map (not found on disk):
    - Mark `missing = 1`.
    - Delete the matching `collection_videos` row for the directory collection.
@@ -74,7 +80,16 @@ planned inserts / updates / missings without writing anything. Useful for:
 If the user re-adds a path matching an existing `directories.removed = 1` row:
 
 - That row's `removed` is cleared.
-- The matching `collections.hidden` is cleared.
-- The scanner runs normally, un-missing previously-seen files and re-adding their membership.
+- The matching `collections.hidden` is cleared (the collection's `name` is preserved,
+  so user label edits survive).
+- The scanner runs normally. For files whose stat signature matches the stored row,
+  the un-missing sub-branch (§3) preserves `thumbnail_ok` and `preview_ok`. The
+  cache-verification pass (§5) then re-enqueues thumbnail or preview jobs only for
+  videos whose cache files are no longer on disk. Videos whose files changed on
+  disk during the hidden period take the regular change path: flags cleared, probe
+  re-enqueued.
+
+This means re-adding a soft-removed directory is cheap if the cache is intact, and
+only does the work that's actually needed when the cache has been cleared.
 
 See [`07-collections.md`](./07-collections.md) for collection-side effects.

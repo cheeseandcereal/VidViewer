@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::{
     clock::ClockRef,
-    ids::{CollectionId, DirectoryId},
+    ids::{CollectionId, DirectoryId, VideoId},
 };
 
 /// A directory record as stored in the `directories` table.
@@ -335,6 +335,118 @@ pub async fn soft_remove(pool: &SqlitePool, clock: &ClockRef, id: DirectoryId) -
     Ok(())
 }
 
+/// Summary of a hard-remove operation. Useful for UI feedback and debugging.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct HardRemoveReport {
+    pub deleted_videos: i64,
+    pub deleted_cache_files: u64,
+    pub deleted_jobs: u64,
+}
+
+/// Permanently delete a directory and all state related to it. Unlike [`soft_remove`],
+/// this is irreversible:
+///
+///   * all thumbnail and preview cache files for videos in this directory are removed
+///     from disk (best-effort; failures to delete individual files are logged but do
+///     not abort the operation);
+///   * `jobs` rows referencing videos in this directory are deleted;
+///   * the `directories` row is deleted, which cascades via FK to `videos`,
+///     `collection_videos` (both directory and custom collection memberships),
+///     `watch_history`, and the directory's own `collections` row.
+///
+/// Custom collections themselves remain, but lose their membership rows for these
+/// videos.
+pub async fn hard_remove(
+    pool: &SqlitePool,
+    _clock: &ClockRef,
+    cache: &crate::scanner::CachePaths,
+    id: DirectoryId,
+) -> Result<HardRemoveReport> {
+    // Verify the directory exists before doing any destructive work.
+    let existed: Option<i64> = sqlx::query_scalar("SELECT id FROM directories WHERE id = ?")
+        .bind(id.raw())
+        .fetch_optional(pool)
+        .await
+        .context("looking up directory for hard-remove")?;
+    if existed.is_none() {
+        bail!("directory id {id} not found");
+    }
+
+    // 1. Collect video ids for cache + job cleanup.
+    let rows = sqlx::query("SELECT id FROM videos WHERE directory_id = ?")
+        .bind(id.raw())
+        .fetch_all(pool)
+        .await
+        .context("listing videos for hard-remove")?;
+    let video_ids: Vec<String> = rows.iter().map(|r| r.get::<String, _>(0)).collect();
+
+    // 2. Remove on-disk cache files for each video (best-effort).
+    let mut deleted_cache_files: u64 = 0;
+    for vid in &video_ids {
+        let vid_typed = VideoId(vid.clone());
+        for path in [
+            cache.thumb_path(&vid_typed),
+            cache.preview_sheet_path(&vid_typed),
+            cache.preview_vtt_path(&vid_typed),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => deleted_cache_files += 1,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "failed to remove cache file during hard-remove"
+                    );
+                }
+            }
+        }
+    }
+
+    // 3. DB cleanup in a single transaction.
+    let mut tx = pool.begin().await.context("begin hard-remove tx")?;
+
+    let deleted_jobs = if video_ids.is_empty() {
+        0
+    } else {
+        // Build an IN (?, ?, …) clause dynamically. SQLite has a practical limit on
+        // parameters (~32k) which is far above anything we'd encounter.
+        let placeholders = vec!["?"; video_ids.len()].join(",");
+        let sql = format!("DELETE FROM jobs WHERE video_id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for v in &video_ids {
+            q = q.bind(v);
+        }
+        q.execute(&mut *tx)
+            .await
+            .context("deleting jobs for hard-removed directory")?
+            .rows_affected()
+    };
+
+    let deleted_videos: i64 = video_ids.len() as i64;
+    sqlx::query("DELETE FROM directories WHERE id = ?")
+        .bind(id.raw())
+        .execute(&mut *tx)
+        .await
+        .context("deleting directory row")?;
+
+    tx.commit().await.context("commit hard-remove tx")?;
+
+    tracing::info!(
+        directory_id = %id,
+        deleted_videos,
+        deleted_cache_files,
+        deleted_jobs,
+        "hard-removed directory"
+    );
+
+    Ok(HardRemoveReport {
+        deleted_videos,
+        deleted_cache_files,
+        deleted_jobs,
+    })
+}
+
 const LIST_COLUMNS: &str = "d.id, d.path, d.label, d.added_at, d.removed, \
     (SELECT COUNT(*) FROM videos v WHERE v.directory_id = d.id AND v.missing = 0) AS video_count, \
     (SELECT c.id FROM collections c WHERE c.kind = 'directory' AND c.directory_id = d.id) AS collection_id";
@@ -525,5 +637,128 @@ mod tests {
             after_running, 1,
             "running jobs are allowed to finish naturally"
         );
+    }
+
+    #[tokio::test]
+    async fn hard_remove_deletes_all_state() {
+        let (tmp, pool, clock) = setup().await;
+        let videos = tmp.path().join("videos");
+        std::fs::create_dir_all(&videos).unwrap();
+        std::fs::write(videos.join("a.mp4"), b"x").unwrap();
+
+        let dir = add(&pool, &clock, &videos, Some("Mine".into()))
+            .await
+            .unwrap();
+
+        let cache = crate::scanner::CachePaths {
+            thumb: tmp.path().join("cache/thumbs"),
+            preview: tmp.path().join("cache/previews"),
+        };
+        let _ = crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
+
+        let video_id: String = sqlx::query_scalar("SELECT id FROM videos LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        // Add this video to a custom collection.
+        let custom = crate::collections::create_custom(&pool, &clock, "Favorites")
+            .await
+            .unwrap();
+        crate::collections::add_video(
+            &pool,
+            &clock,
+            custom.id,
+            &crate::ids::VideoId(video_id.clone()),
+        )
+        .await
+        .unwrap();
+
+        // Write fake cache files on disk + a watch_history row.
+        std::fs::create_dir_all(&cache.thumb).unwrap();
+        std::fs::create_dir_all(&cache.preview).unwrap();
+        let thumb = cache.thumb.join(format!("{video_id}.jpg"));
+        let sheet = cache.preview.join(format!("{video_id}.jpg"));
+        let vtt = cache.preview.join(format!("{video_id}.vtt"));
+        std::fs::write(&thumb, b"x").unwrap();
+        std::fs::write(&sheet, b"x").unwrap();
+        std::fs::write(&vtt, b"WEBVTT\n").unwrap();
+
+        sqlx::query(
+            "INSERT INTO watch_history (video_id, last_watched_at, position_secs, completed, \
+                watch_count) VALUES (?, ?, 10.0, 0, 1)",
+        )
+        .bind(&video_id)
+        .bind(clock.now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let report = hard_remove(&pool, &clock, &cache, dir.id).await.unwrap();
+        assert_eq!(report.deleted_videos, 1);
+        assert_eq!(report.deleted_cache_files, 3);
+
+        // DB rows are gone (cascade).
+        let count_dirs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM directories")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let count_videos: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM videos")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let count_history: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM watch_history")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let count_dir_colls: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM collections WHERE kind = 'directory'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let count_custom_coll_memberships: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM collection_videos cv \
+             JOIN collections c ON c.id = cv.collection_id \
+             WHERE c.kind = 'custom'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count_dirs, 0);
+        assert_eq!(count_videos, 0);
+        assert_eq!(count_history, 0);
+        assert_eq!(count_dir_colls, 0);
+        assert_eq!(
+            count_custom_coll_memberships, 0,
+            "custom membership rows cascade-deleted"
+        );
+
+        // Custom collection itself survives.
+        let count_custom_colls: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM collections WHERE kind = 'custom'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count_custom_colls, 1);
+
+        // Cache files are gone.
+        assert!(!thumb.exists());
+        assert!(!sheet.exists());
+        assert!(!vtt.exists());
+    }
+
+    #[tokio::test]
+    async fn hard_remove_errors_on_missing_id() {
+        let (tmp, pool, clock) = setup().await;
+        let cache = crate::scanner::CachePaths {
+            thumb: tmp.path().join("cache/thumbs"),
+            preview: tmp.path().join("cache/previews"),
+        };
+        let err = hard_remove(&pool, &clock, &cache, DirectoryId(9999))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
     }
 }

@@ -53,7 +53,18 @@ Errors: `path_not_absolute`, `path_not_found`, `path_not_a_directory`, `path_not
 | GET | `/api/directories` | List all directories including removed ones (UI filters). |
 | POST | `/api/directories` | Body `{ path, label? }`. Un-hides if an existing matching row has `removed=1`. |
 | PATCH | `/api/directories/:id` | Body `{ label }`. Also updates the directory collection's `name`. |
-| DELETE | `/api/directories/:id` | Soft-remove; preserves history. |
+| DELETE | `/api/directories/:id?mode=soft\|hard` | Soft-remove (default) preserves history and cache. Hard-remove cascades through `videos`, `collection_videos`, `watch_history`, and the directory's `collections` row, and deletes cache files on disk. |
+
+Soft remove returns `204 No Content`.
+
+Hard remove returns `200 OK` with:
+
+```json
+{ "deleted_videos": 12, "deleted_cache_files": 36, "deleted_jobs": 0 }
+```
+
+A mode other than `soft` or `hard` returns `400 Bad Request` with
+`{ "error": "bad_mode" }`.
 
 POST errors: `path_not_absolute`, `path_not_found`, `path_not_a_directory`, `path_not_readable`, `path_already_added` (non-removed duplicate).
 

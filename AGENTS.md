@@ -85,7 +85,10 @@ These must remain true; violating them means a bug:
 3. Directory collections (`collections.kind = 'directory'`) can only be mutated via their `name` field. All other mutations must return `400` at the API boundary.
 4. A video marked `missing = 1` is removed from its directory collection's `collection_videos` rows but remains in any custom collection memberships (rendered with a "missing" badge).
 5. Soft-removed directories (`directories.removed = 1`) are skipped by the scanner. Their directory collection is flagged `hidden = 1` and not shown in listings. Re-adding the same path un-hides and un-removes in place.
-6. Watch history (`watch_history` rows) is never deleted as a side effect of directory soft-remove. Only hard-deleting a video (currently never done by the app) would cascade-delete history.
+6. Watch history (`watch_history` rows) is preserved under **soft remove**. **Hard
+   remove** of a directory (user-confirmed destructive action) cascades through
+   `videos` → `watch_history`, `collection_videos`, and the directory's `collections`
+   row, and also deletes cached thumbnails and previews for those videos from disk.
 
 ## What not to do
 
@@ -94,7 +97,9 @@ These must remain true; violating them means a bug:
 - Do not add auth or LAN exposure — this is localhost-only.
 - Do not add in-browser playback in v1.
 - Do not edit committed migrations.
-- Do not delete rows on directory removal — soft-remove only.
+- Directory removal is either soft (default, preserves history) or hard
+  (explicit user action, cascades via FK). Never perform a hard-remove as a
+  side effect — it must be user-initiated through the `mode=hard` API path.
 
 ## Running and testing
 

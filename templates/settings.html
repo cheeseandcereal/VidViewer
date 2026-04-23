@@ -34,7 +34,7 @@
         <td data-field="actions">
           {% if !d.removed %}
             <button type="button" class="btn-rescan">Rescan</button>
-            <button type="button" class="danger btn-remove">Remove</button>
+            <button type="button" class="danger btn-remove">Remove…</button>
           {% endif %}
         </td>
       </tr>
@@ -63,6 +63,32 @@
     <button type="button" id="picker-cancel">Cancel</button>
   </div>
   <p class="muted picker-status" id="picker-status"></p>
+</section>
+
+<section class="card" id="remove-modal" hidden>
+  <h2>Remove <span id="remove-modal-label" class="mono"></span></h2>
+  <div class="remove-option">
+    <h3>Soft remove</h3>
+    <p class="muted">
+      Hide from the UI. Watch history, custom collection memberships, and cached
+      thumbnails are preserved. You can re-add this directory later without losing
+      progress; cached thumbnails are reused if the source files haven't changed.
+    </p>
+    <button type="button" class="primary" id="btn-remove-soft">Soft remove</button>
+  </div>
+  <hr class="divider">
+  <div class="remove-option">
+    <h3>Permanently delete</h3>
+    <p class="muted">
+      Delete the directory and all of its videos from the database. Watch history,
+      custom collection memberships, and cached thumbnails and previews for these
+      videos will be removed. This cannot be undone.
+    </p>
+    <button type="button" class="danger" id="btn-remove-hard">Permanently delete</button>
+  </div>
+  <div class="row">
+    <button type="button" id="btn-remove-cancel">Cancel</button>
+  </div>
 </section>
 
 <section class="card">

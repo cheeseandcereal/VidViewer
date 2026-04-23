@@ -45,15 +45,15 @@ impl CachePaths {
         }
     }
 
-    fn thumb_path(&self, video_id: &VideoId) -> PathBuf {
+    pub fn thumb_path(&self, video_id: &VideoId) -> PathBuf {
         self.thumb.join(format!("{}.jpg", video_id.as_str()))
     }
 
-    fn preview_sheet_path(&self, video_id: &VideoId) -> PathBuf {
+    pub fn preview_sheet_path(&self, video_id: &VideoId) -> PathBuf {
         self.preview.join(format!("{}.jpg", video_id.as_str()))
     }
 
-    fn preview_vtt_path(&self, video_id: &VideoId) -> PathBuf {
+    pub fn preview_vtt_path(&self, video_id: &VideoId) -> PathBuf {
         self.preview.join(format!("{}.vtt", video_id.as_str()))
     }
 }
@@ -290,14 +290,22 @@ async fn scan_one(
                 // is already queued and will enqueue thumbnail+preview on completion.
                 // Skip the cache verification for them below.
             }
-            Some(k) if k.size_bytes != size || k.mtime_unix != mtime || k.missing => {
+            Some(k) if k.size_bytes != size || k.mtime_unix != mtime => {
+                // Content changed on disk: clear flags, re-enqueue probe.
                 update_changed_video(pool, clock, dir, &k.id, size, mtime, k.missing).await?;
-                if !k.missing && (k.size_bytes != size || k.mtime_unix != mtime) {
+                if !k.missing {
                     progress.changed_videos.fetch_add(1, Ordering::Relaxed);
                     report.changed_videos += 1;
                 }
-                // Content changed — flags were cleared and probe re-enqueued.
-                // Skip cache verification.
+                // Skip cache verification — the probe's follow-up jobs cover regen.
+            }
+            Some(k) if k.missing => {
+                // Un-missing without content change: preserve flags, re-insert the
+                // directory collection membership. The post-walk cache verification
+                // pass will detect any missing cache files and re-enqueue only the
+                // jobs that are actually needed.
+                un_mark_missing(pool, clock, dir, &k.id).await?;
+                surviving.push((k.id, k.thumbnail_ok, k.preview_ok, k.duration_secs));
             }
             Some(k) => {
                 // Unchanged: verify cache outputs at the end.
@@ -531,6 +539,34 @@ async fn mark_missing(
 
     tx.commit().await.context("commit tx")?;
     let _ = clock; // suppress unused-warning if above path becomes no-op
+    Ok(())
+}
+
+/// Un-mark a video as missing without touching `thumbnail_ok` / `preview_ok`.
+///
+/// Used on re-add of a soft-removed directory when the file's size and mtime match
+/// the stored row: we only need to flip `missing = 0`, touch `updated_at`, and
+/// re-insert the directory-collection membership. The post-walk cache verification
+/// pass then detects any missing cache files and re-enqueues only what's needed.
+async fn un_mark_missing(
+    pool: &SqlitePool,
+    clock: &ClockRef,
+    dir: &directories::Directory,
+    video_id: &VideoId,
+) -> Result<()> {
+    let now_s = clock.now().to_rfc3339();
+    let mut tx = pool.begin().await.context("begin tx")?;
+
+    sqlx::query("UPDATE videos SET missing = 0, updated_at = ? WHERE id = ?")
+        .bind(&now_s)
+        .bind(video_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .context("clearing missing flag")?;
+
+    add_to_directory_collection(&mut tx, dir.collection_id, video_id, &now_s).await?;
+
+    tx.commit().await.context("commit tx")?;
     Ok(())
 }
 
@@ -819,5 +855,133 @@ mod tests {
         let report = scan_all(&pool, &clock, &cache).await.unwrap();
         assert_eq!(report.recovered_thumbnail_jobs, 0);
         assert_eq!(report.recovered_preview_jobs, 0);
+    }
+
+    /// Helper: soft-remove the single directory in the test DB and return its id.
+    async fn soft_remove_only_dir(pool: &SqlitePool, clock: &ClockRef) -> DirectoryId {
+        let dir_id: i64 = sqlx::query_scalar("SELECT id FROM directories LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let id = DirectoryId(dir_id);
+        crate::directories::soft_remove(pool, clock, id)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn re_add_preserves_flags_when_cache_present() {
+        let (tmp, pool, clock, cache) = setup().await;
+        let videos_dir = tmp.path().join("videos");
+        std::fs::create_dir_all(&videos_dir).unwrap();
+        write_video(&videos_dir, "a.mp4", b"x");
+
+        add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+        scan_all(&pool, &clock, &cache).await.unwrap();
+
+        // Simulate the probe+thumb+preview pipeline having completed.
+        let video_id: String = sqlx::query_scalar("SELECT id FROM videos LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE videos SET thumbnail_ok = 1, preview_ok = 1, duration_secs = 60.0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET status = 'done'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        std::fs::create_dir_all(&cache.thumb).unwrap();
+        std::fs::create_dir_all(&cache.preview).unwrap();
+        std::fs::write(cache.thumb.join(format!("{video_id}.jpg")), b"x").unwrap();
+        std::fs::write(cache.preview.join(format!("{video_id}.jpg")), b"x").unwrap();
+        std::fs::write(cache.preview.join(format!("{video_id}.vtt")), b"WEBVTT\n").unwrap();
+
+        // Soft-remove, then re-add the same directory path.
+        soft_remove_only_dir(&pool, &clock).await;
+        add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+
+        let report = scan_all(&pool, &clock, &cache).await.unwrap();
+        assert_eq!(report.recovered_thumbnail_jobs, 0);
+        assert_eq!(report.recovered_preview_jobs, 0);
+
+        // Flags preserved, missing cleared.
+        let (thumb_ok, preview_ok, missing): (i64, i64, i64) =
+            sqlx::query_as("SELECT thumbnail_ok, preview_ok, missing FROM videos LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(thumb_ok, 1);
+        assert_eq!(preview_ok, 1);
+        assert_eq!(missing, 0);
+
+        // No probe/thumbnail/preview jobs were enqueued by the re-add scan.
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status IN ('pending','running')")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 0);
+    }
+
+    #[tokio::test]
+    async fn re_add_regenerates_flags_when_cache_missing() {
+        let (tmp, pool, clock, cache) = setup().await;
+        let videos_dir = tmp.path().join("videos");
+        std::fs::create_dir_all(&videos_dir).unwrap();
+        write_video(&videos_dir, "a.mp4", b"x");
+
+        add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+        scan_all(&pool, &clock, &cache).await.unwrap();
+
+        // Same setup as above, but cache files never exist on disk.
+        sqlx::query("UPDATE videos SET thumbnail_ok = 1, preview_ok = 1, duration_secs = 60.0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET status = 'done'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        soft_remove_only_dir(&pool, &clock).await;
+        add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+
+        let report = scan_all(&pool, &clock, &cache).await.unwrap();
+        assert_eq!(report.recovered_thumbnail_jobs, 1);
+        assert_eq!(report.recovered_preview_jobs, 1);
+
+        // Flags cleared.
+        let (thumb_ok, preview_ok): (i64, i64) =
+            sqlx::query_as("SELECT thumbnail_ok, preview_ok FROM videos LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(thumb_ok, 0);
+        assert_eq!(preview_ok, 0);
+
+        // Thumbnail + preview jobs re-enqueued; no probe (duration is still valid).
+        let pending_thumb: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE kind='thumbnail' AND status='pending'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let pending_preview: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE kind='preview' AND status='pending'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let pending_probe: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE kind='probe' AND status='pending'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pending_thumb, 1);
+        assert_eq!(pending_preview, 1);
+        assert_eq!(pending_probe, 0);
     }
 }

@@ -41,12 +41,33 @@ When a directory is soft-removed (`directories.removed = 1`):
 - All `collection_videos` rows for that collection are deleted.
 - All videos in that directory are flagged `missing = 1`.
 - `watch_history` and custom-collection memberships are preserved.
+- Cached thumbnails and previews are left on disk.
 
 When re-added:
 
 - `directories.removed` is cleared, `collections.hidden` is cleared, and the collection's
   existing `name` is preserved (so user label edits survive re-adds).
-- The scanner runs and repopulates `collection_videos`.
+- The scanner runs and repopulates `collection_videos`. Videos whose stat signature
+  still matches the stored row have their `thumbnail_ok` / `preview_ok` flags
+  preserved; the cache-verification pass re-enqueues jobs only for videos whose
+  cache files are no longer on disk. See [`04-scanner.md`](./04-scanner.md).
+
+## Hard-removed directories
+
+Hard-remove is an explicit user action (`DELETE /api/directories/:id?mode=hard`).
+It is irreversible:
+
+- All thumbnail and preview cache files for videos in the directory are removed
+  from disk (best-effort).
+- All `jobs` rows referencing those videos are deleted.
+- The `directories` row is deleted, which cascades via FK to `videos`,
+  `collection_videos` (both directory and custom collection memberships), the
+  directory's own `collections` row, and `watch_history`.
+- Custom collections themselves remain; only their memberships for these videos
+  are removed.
+
+Never hard-remove as a side effect of another action. It must be user-initiated
+through the `mode=hard` API path.
 
 ## Random
 

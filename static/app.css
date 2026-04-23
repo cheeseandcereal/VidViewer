@@ -227,6 +227,15 @@ table.dirs th {
 
 .picker-status { min-height: 1em; }
 
+.remove-option { margin-bottom: var(--space-3); }
+.remove-option h3 { margin: 0 0 var(--space-1); font-size: 15px; }
+.remove-option p { margin: 0 0 var(--space-2); }
+.divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: var(--space-3) 0;
+}
+
 .section-heading {
     font-size: 18px;
     margin: var(--space-4) 0 var(--space-2);

@@ -131,7 +131,11 @@ CREATE TABLE ui_state (
 - Directory collections (`kind = 'directory'`) can only be mutated through their `name` field.
 - When a video is soft-deleted (`missing = 1`) its `collection_videos` row for its directory collection is deleted; custom collection rows are preserved.
 - Soft-removed directories (`removed = 1`) are skipped by the scanner; their directory collection has `hidden = 1`.
-- Watch history is never deleted as a side effect of directory soft-remove.
+- Watch history is preserved under soft-remove. Hard-remove (explicit user action
+  via the `mode=hard` API path) cascades through FKs: deleting a `directories`
+  row removes its `videos`, which in turn cascades to `collection_videos`,
+  `watch_history`, and the directory's own `collections` row. `jobs` rows have
+  no FK and are cleaned up manually by the hard-remove implementation.
 
 ## Migrations
 

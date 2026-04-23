@@ -95,6 +95,49 @@
         if (ev.key === 'Enter') pickerLoad(pathInput.value);
     });
 
+    // --- Remove modal ---
+
+    const removeModal = $('#remove-modal');
+    const removeModalLabel = $('#remove-modal-label');
+    const btnRemoveSoft = $('#btn-remove-soft');
+    const btnRemoveHard = $('#btn-remove-hard');
+    const btnRemoveCancel = $('#btn-remove-cancel');
+    let removeTargetId = null;
+
+    function openRemoveModal(id, label) {
+        removeTargetId = id;
+        if (removeModalLabel) removeModalLabel.textContent = label || '';
+        if (removeModal) removeModal.hidden = false;
+    }
+    function closeRemoveModal() {
+        removeTargetId = null;
+        if (removeModal) removeModal.hidden = true;
+    }
+    async function performRemove(mode) {
+        if (!removeTargetId) return;
+        const id = removeTargetId;
+        const url = `/api/directories/${encodeURIComponent(id)}?mode=${encodeURIComponent(mode)}`;
+        const resp = await fetch(url, { method: 'DELETE' });
+        if (!resp.ok) {
+            alert(`${mode === 'hard' ? 'Delete' : 'Remove'} failed`);
+            return;
+        }
+        closeRemoveModal();
+        refreshDirectories();
+        scheduleNextPoll(0);
+    }
+    if (btnRemoveSoft) btnRemoveSoft.addEventListener('click', () => performRemove('soft'));
+    if (btnRemoveHard) btnRemoveHard.addEventListener('click', () => {
+        if (!confirm(
+            'Permanently delete this directory?\n\n' +
+            'All videos in this directory, their watch history, memberships in custom ' +
+            'collections, and cached thumbnails/previews will be removed from disk.\n\n' +
+            'This cannot be undone.'
+        )) return;
+        performRemove('hard');
+    });
+    if (btnRemoveCancel) btnRemoveCancel.addEventListener('click', closeRemoveModal);
+
     // --- Row-level actions: rename, remove, rescan ---
 
     document.addEventListener('click', async ev => {
@@ -116,14 +159,9 @@
         }
 
         if (target.classList.contains('btn-remove')) {
-            if (!confirm(
-                'Remove this directory?\n\n' +
-                'Videos in this directory will be hidden from the UI. Watch history and\n' +
-                'custom collection memberships are preserved. You can re-add this path later.'
-            )) return;
-            const resp = await fetch(`/api/directories/${encodeURIComponent(id)}`, { method: 'DELETE' });
-            if (!resp.ok) { alert('Remove failed'); return; }
-            refreshDirectories();
+            const labelEl = row.querySelector('.label-text');
+            const label = labelEl ? labelEl.textContent : '';
+            openRemoveModal(id, label);
         } else if (target.classList.contains('btn-rename')) {
             const labelEl = row.querySelector('.label-text');
             const cur = labelEl ? labelEl.textContent : '';

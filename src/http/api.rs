@@ -78,10 +78,38 @@ pub async fn patch_directory(
     }
 }
 
-pub async fn delete_directory(State(state): State<AppState>, AxPath(id): AxPath<i64>) -> Response {
-    match directories::soft_remove(&state.pool, &state.clock, DirectoryId(id)).await {
-        Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
-        Err(err) => internal(err),
+#[derive(Debug, Deserialize)]
+pub struct DeleteDirectoryQuery {
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+pub async fn delete_directory(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    Query(q): Query<DeleteDirectoryQuery>,
+) -> Response {
+    let mode = q.mode.as_deref().unwrap_or("soft");
+    match mode {
+        "soft" => match directories::soft_remove(&state.pool, &state.clock, DirectoryId(id)).await
+        {
+            Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
+            Err(err) => internal(err),
+        },
+        "hard" => {
+            let cache = scanner::CachePaths::from_config(&state.config);
+            match directories::hard_remove(&state.pool, &state.clock, &cache, DirectoryId(id))
+                .await
+            {
+                Ok(report) => (StatusCode::OK, Json(report)).into_response(),
+                Err(err) => internal(err),
+            }
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "bad_mode", "message": "mode must be 'soft' or 'hard'"})),
+        )
+            .into_response(),
     }
 }
 
