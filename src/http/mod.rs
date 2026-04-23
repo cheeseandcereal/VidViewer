@@ -1,15 +1,17 @@
 //! HTTP server setup.
 //!
-//! For now this wires up a minimal router with `/healthz` and a placeholder root.
-//! Real routes are added in later build steps.
+//! Wires the router, static-file serving, page handlers, and graceful shutdown.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use anyhow::{Context, Result};
-use axum::{response::IntoResponse, routing::get, Router};
+use axum::Router;
 use tokio::signal;
+use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::state::AppState;
+
+pub mod pages;
 
 pub async fn serve(state: AppState) -> Result<()> {
     let port = state.config.port;
@@ -29,14 +31,19 @@ pub async fn serve(state: AppState) -> Result<()> {
     Ok(())
 }
 
-fn router(state: AppState) -> Router {
+pub(crate) fn router(state: AppState) -> Router {
+    let static_dir = ServeDir::new("static");
+
     Router::new()
-        .route("/healthz", get(healthz))
-        .route("/", get(root))
+        .route("/healthz", axum::routing::get(healthz))
+        .route("/", axum::routing::get(pages::home))
+        .nest_service("/static", static_dir)
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
-async fn healthz() -> impl IntoResponse {
+async fn healthz() -> axum::response::Response {
+    use axum::response::IntoResponse;
     (
         [(
             axum::http::header::CONTENT_TYPE,
@@ -44,13 +51,7 @@ async fn healthz() -> impl IntoResponse {
         )],
         "ok",
     )
-}
-
-async fn root() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        "<!doctype html><meta charset=\"utf-8\"><title>vidviewer</title><p>vidviewer is running.</p>",
-    )
+        .into_response()
 }
 
 async fn shutdown_signal() {
@@ -87,7 +88,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::util::ServiceExt;
 
-    async fn test_state() -> AppState {
+    pub(crate) async fn test_state() -> AppState {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config {
             backup_dir: tmp.path().join("backups"),
@@ -131,5 +132,12 @@ mod tests {
             .unwrap();
         assert!(ctype.contains("text/html"), "got {ctype}");
         assert!(ctype.contains("charset=utf-8"), "got {ctype}");
+
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(s.contains("<!doctype html>"));
+        assert!(s.contains("Noto Sans CJK") || s.contains("/static/app.css"));
     }
 }
