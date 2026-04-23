@@ -362,45 +362,60 @@ async fn verify_cache_for_video(
     progress: &ScanProgress,
     report: &mut ScanReport,
 ) -> Result<()> {
-    // Thumbnail: expected if thumbnail_ok is set.
-    if thumbnail_ok {
-        let p = cache.thumb_path(video_id);
-        if !p.exists() {
-            let now_s = clock.now().to_rfc3339();
-            let mut tx = pool.begin().await.context("begin tx")?;
+    // Expected state for a video that made it through the walk:
+    //   * a thumbnail exists at `cache/thumbs/<id>.jpg`, and `thumbnail_ok = 1`;
+    //   * a preview tile sheet + VTT exist at `cache/previews/<id>.{jpg,vtt}`, and
+    //     `preview_ok = 1` (only when the video has a usable duration).
+    //
+    // If either side of the invariant is out of sync — the flag is set but the
+    // cache file is missing, OR the flag is clear but we never did the work —
+    // we clear the flag and enqueue a fresh job. `enqueue_on` is idempotent,
+    // so an already-pending or already-running job is a no-op.
+
+    // Thumbnail.
+    let thumb_path = cache.thumb_path(video_id);
+    let thumb_exists = thumb_path.exists();
+    if !(thumbnail_ok && thumb_exists) {
+        let now_s = clock.now().to_rfc3339();
+        let mut tx = pool.begin().await.context("begin tx")?;
+        if thumbnail_ok {
             sqlx::query("UPDATE videos SET thumbnail_ok = 0, updated_at = ? WHERE id = ?")
                 .bind(&now_s)
                 .bind(video_id.as_str())
                 .execute(&mut *tx)
                 .await
                 .context("clearing thumbnail_ok")?;
-            jobs::enqueue_on(&mut tx, jobs::Kind::Thumbnail, video_id).await?;
-            tx.commit().await.context("commit tx")?;
-            progress
-                .recovered_thumbnail_jobs
-                .fetch_add(1, Ordering::Relaxed);
-            report.recovered_thumbnail_jobs += 1;
-            tracing::info!(
-                video_id = %video_id,
-                missing_cache = %p.display(),
-                "thumbnail cache missing; cleared flag and re-enqueued"
-            );
         }
+        jobs::enqueue_on(&mut tx, jobs::Kind::Thumbnail, video_id).await?;
+        tx.commit().await.context("commit tx")?;
+        progress
+            .recovered_thumbnail_jobs
+            .fetch_add(1, Ordering::Relaxed);
+        report.recovered_thumbnail_jobs += 1;
+        tracing::info!(
+            video_id = %video_id,
+            flag = thumbnail_ok,
+            file_exists = thumb_exists,
+            "thumbnail cache incomplete; enqueued job"
+        );
     }
 
-    // Preview: expected if preview_ok is set AND duration is usable.
-    if preview_ok && duration_secs.unwrap_or(0.0) > 0.0 {
+    // Preview (only when duration is usable).
+    if duration_secs.unwrap_or(0.0) > 0.0 {
         let sheet = cache.preview_sheet_path(video_id);
         let vtt = cache.preview_vtt_path(video_id);
-        if !sheet.exists() || !vtt.exists() {
+        let preview_files_present = sheet.exists() && vtt.exists();
+        if !(preview_ok && preview_files_present) {
             let now_s = clock.now().to_rfc3339();
             let mut tx = pool.begin().await.context("begin tx")?;
-            sqlx::query("UPDATE videos SET preview_ok = 0, updated_at = ? WHERE id = ?")
-                .bind(&now_s)
-                .bind(video_id.as_str())
-                .execute(&mut *tx)
-                .await
-                .context("clearing preview_ok")?;
+            if preview_ok {
+                sqlx::query("UPDATE videos SET preview_ok = 0, updated_at = ? WHERE id = ?")
+                    .bind(&now_s)
+                    .bind(video_id.as_str())
+                    .execute(&mut *tx)
+                    .await
+                    .context("clearing preview_ok")?;
+            }
             jobs::enqueue_on(&mut tx, jobs::Kind::Preview, video_id).await?;
             tx.commit().await.context("commit tx")?;
             progress
@@ -409,9 +424,10 @@ async fn verify_cache_for_video(
             report.recovered_preview_jobs += 1;
             tracing::info!(
                 video_id = %video_id,
-                missing_sheet = %sheet.display(),
-                missing_vtt = %vtt.display(),
-                "preview cache missing; cleared flag and re-enqueued"
+                flag = preview_ok,
+                sheet_exists = sheet.exists(),
+                vtt_exists = vtt.exists(),
+                "preview cache incomplete; enqueued job"
             );
         }
     }
@@ -726,6 +742,28 @@ mod tests {
 
         add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
         let _ = scan_all(&pool, &clock, &cache).await.unwrap();
+
+        // Simulate the probe + thumbnail + preview pipeline having completed
+        // successfully, and the expected cache files being on disk. This is the
+        // steady-state "nothing to do" condition a second scan should observe.
+        let video_id: String = sqlx::query_scalar("SELECT id FROM videos LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE videos SET thumbnail_ok = 1, preview_ok = 1, duration_secs = 60.0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET status = 'done'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        std::fs::create_dir_all(&cache.thumb).unwrap();
+        std::fs::create_dir_all(&cache.preview).unwrap();
+        std::fs::write(cache.thumb.join(format!("{video_id}.jpg")), b"x").unwrap();
+        std::fs::write(cache.preview.join(format!("{video_id}.jpg")), b"x").unwrap();
+        std::fs::write(cache.preview.join(format!("{video_id}.vtt")), b"WEBVTT\n").unwrap();
+
         let report = scan_all(&pool, &clock, &cache).await.unwrap();
         assert_eq!(report.new_videos, 0);
         assert_eq!(report.changed_videos, 0);
@@ -983,5 +1021,50 @@ mod tests {
         assert_eq!(pending_thumb, 1);
         assert_eq!(pending_preview, 1);
         assert_eq!(pending_probe, 0);
+    }
+
+    #[tokio::test]
+    async fn rescan_enqueues_missing_jobs_even_when_flags_are_zero() {
+        // Covers the case where a past thumbnail/preview job never completed (e.g.
+        // failed, was aborted by a directory remove, or the worker crashed). The
+        // flag is 0 and the file is absent. A fresh scan should notice the gap
+        // and enqueue a job regardless of the flag state.
+        let (tmp, pool, clock, cache) = setup().await;
+        let videos_dir = tmp.path().join("videos");
+        std::fs::create_dir_all(&videos_dir).unwrap();
+        write_video(&videos_dir, "a.mp4", b"x");
+
+        add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+        scan_all(&pool, &clock, &cache).await.unwrap();
+
+        // Pretend the probe completed but thumbnail and preview jobs never did.
+        // Flags stay at 0; no cache files exist on disk.
+        sqlx::query("UPDATE videos SET duration_secs = 60.0, thumbnail_ok = 0, preview_ok = 0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let report = scan_all(&pool, &clock, &cache).await.unwrap();
+        assert_eq!(report.recovered_thumbnail_jobs, 1);
+        assert_eq!(report.recovered_preview_jobs, 1);
+
+        let pending_thumb: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE kind='thumbnail' AND status='pending'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let pending_preview: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE kind='preview' AND status='pending'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending_thumb, 1);
+        assert_eq!(pending_preview, 1);
     }
 }

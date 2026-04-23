@@ -43,17 +43,27 @@ For each directory with `removed = 0`:
    - Mark `missing = 1`.
    - Delete the matching `collection_videos` row for the directory collection.
    - Leave custom collection memberships intact. Leave `watch_history` intact.
-5. **Cache verification.** For each video that survived the walk and is flagged
-   `thumbnail_ok = 1` or `preview_ok = 1`, check whether the expected cache file
-   exists on disk:
-   - `cache/thumbs/<video_id>.jpg` for thumbnails.
-   - `cache/previews/<video_id>.jpg` **and** `cache/previews/<video_id>.vtt` for previews
-     (only checked when `duration_secs` is known and positive).
+5. **Cache verification.** For each video that survived the walk, check that the
+   expected derived assets exist on disk and that the corresponding DB flag is set.
+   The invariant is **(flag = 1) ⇔ (file exists)**. If either side is off, clear
+   the flag and enqueue a fresh job.
 
-   If an expected file is missing, clear the corresponding flag and enqueue a new job.
-   This is the recovery path when a user has cleared or moved the cache directory.
-   Counters `recovered_thumbnail_jobs` / `recovered_preview_jobs` on `ScanReport` track
-   how many recoveries happened.
+   - `cache/thumbs/<video_id>.jpg` for thumbnails. Checked unconditionally.
+   - `cache/previews/<video_id>.jpg` **and** `cache/previews/<video_id>.vtt` for
+     previews. Only checked when `duration_secs` is known and positive (previews
+     require duration).
+
+   This pass catches three recovery scenarios:
+   1. The user cleared or moved the cache directory (flag = 1, file missing).
+   2. A past job failed or was aborted (flag = 0, file missing); the scan
+      re-enqueues rather than waiting for another event to trigger regeneration.
+   3. Re-adding a soft-removed directory where the cache is still intact; the
+      invariant holds on both sides, and nothing is enqueued.
+
+   Counters `recovered_thumbnail_jobs` / `recovered_preview_jobs` on `ScanReport`
+   track how many recoveries happened. `enqueue_on` is idempotent, so if a job
+   is already pending or running for the same `(kind, video_id)`, no duplicate
+   row is inserted.
 
 ## Filename handling
 
