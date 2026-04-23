@@ -262,8 +262,12 @@ pub async fn set_label(
 ///   * mark the directory collection `hidden = 1`
 ///   * delete `collection_videos` rows for that collection (so on re-add, scanner repopulates)
 ///   * mark all videos in this directory `missing = 1`
+///   * cancel any pending background jobs for videos in this directory
 ///
-/// Watch history and custom collection memberships are preserved.
+/// Watch history and custom collection memberships are preserved. Jobs already in the
+/// `running` state are allowed to finish naturally — the wasted work is bounded and
+/// cancelling mid-ffmpeg would require process tracking that isn't worth the complexity
+/// for this case.
 pub async fn soft_remove(pool: &SqlitePool, clock: &ClockRef, id: DirectoryId) -> Result<()> {
     let now_s = clock.now().to_rfc3339();
     let mut tx = pool.begin().await.context("begin tx")?;
@@ -306,7 +310,28 @@ pub async fn soft_remove(pool: &SqlitePool, clock: &ClockRef, id: DirectoryId) -
         .await
         .context("marking videos missing")?;
 
+    // Cancel pending jobs for videos in this directory. Rows with status = 'running'
+    // are left alone; the worker will complete them on a now-missing video, which is
+    // harmless — flags on a missing row are not shown in the UI.
+    let cancelled = sqlx::query(
+        "DELETE FROM jobs \
+         WHERE status = 'pending' \
+         AND video_id IN (SELECT id FROM videos WHERE directory_id = ?)",
+    )
+    .bind(id.raw())
+    .execute(&mut *tx)
+    .await
+    .context("cancelling pending jobs for removed directory")?
+    .rows_affected();
+
     tx.commit().await.context("commit tx")?;
+    if cancelled > 0 {
+        tracing::info!(
+            directory_id = %id,
+            cancelled_jobs = cancelled,
+            "cancelled pending jobs for removed directory"
+        );
+    }
     Ok(())
 }
 
@@ -447,5 +472,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(name, "Renamed");
+    }
+
+    #[tokio::test]
+    async fn soft_remove_cancels_pending_jobs_but_keeps_running() {
+        let (tmp, pool, clock) = setup().await;
+        let videos = tmp.path().join("videos");
+        std::fs::create_dir_all(&videos).unwrap();
+        std::fs::write(videos.join("a.mp4"), b"x").unwrap();
+        std::fs::write(videos.join("b.mp4"), b"y").unwrap();
+
+        add(&pool, &clock, &videos, None).await.unwrap();
+        let _ = crate::scanner::scan_all(&pool, &clock).await.unwrap();
+
+        // Two probe jobs were enqueued as 'pending'. Mark one as 'running' to simulate
+        // a worker that has claimed it mid-flight.
+        let job_id: i64 = sqlx::query_scalar("SELECT id FROM jobs ORDER BY id LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET status = 'running' WHERE id = ?")
+            .bind(job_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (before_pending, before_running, _, _) =
+            crate::jobs::count_by_status(&pool).await.unwrap();
+        assert_eq!(before_pending, 1);
+        assert_eq!(before_running, 1);
+
+        let dir_id: i64 = sqlx::query_scalar("SELECT id FROM directories LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        soft_remove(&pool, &clock, DirectoryId(dir_id))
+            .await
+            .unwrap();
+
+        // Pending job for this directory must be gone; running job remains untouched.
+        let (after_pending, after_running, _, _) =
+            crate::jobs::count_by_status(&pool).await.unwrap();
+        assert_eq!(after_pending, 0, "pending jobs should be cancelled");
+        assert_eq!(
+            after_running, 1,
+            "running jobs are allowed to finish naturally"
+        );
     }
 }
