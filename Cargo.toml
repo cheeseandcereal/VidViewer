@@ -19,6 +19,7 @@ path = "src/lib.rs"
 anyhow = "1"
 askama = "0.12"
 askama_axum = "0.4"
+async-trait = "0.1"
 axum = { version = "0.7", features = ["macros"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive"] }

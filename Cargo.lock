@@ -2405,6 +2405,7 @@ dependencies = [
  "anyhow",
  "askama",
  "askama_axum",
+ "async-trait",
  "axum",
  "chrono",
  "clap",
