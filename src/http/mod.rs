@@ -56,7 +56,8 @@ pub async fn serve(state: AppState) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding to {addr}"))?;
-    tracing::info!(%addr, "vidviewer listening");
+    let url = format!("http://{addr}/");
+    tracing::info!(%addr, %url, "vidviewer listening — open {url}");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
