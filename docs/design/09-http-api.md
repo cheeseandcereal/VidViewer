@@ -1,7 +1,5 @@
 # 09 — HTTP API
 
-Last updated: 2026-04-22
-
 All responses are JSON unless otherwise noted. HTML page responses have
 `Content-Type: text/html; charset=utf-8`.
 
@@ -53,7 +51,7 @@ Errors: `path_not_absolute`, `path_not_found`, `path_not_a_directory`, `path_not
 | GET | `/api/directories` | List all directories including removed ones (UI filters). |
 | POST | `/api/directories` | Body `{ path, label? }`. Un-hides if an existing matching row has `removed=1`. |
 | PATCH | `/api/directories/:id` | Body `{ label }`. Also updates the directory collection's `name`. |
-| DELETE | `/api/directories/:id?mode=soft\|hard` | Soft-remove (default) preserves history and cache. Hard-remove cascades through `videos`, `collection_videos`, `watch_history`, and the directory's `collections` row, and deletes cache files on disk. |
+| DELETE | `/api/directories/:id?mode=soft\|hard` | Soft-remove (default) preserves history and cache. Hard-remove cascades through `videos`, `watch_history`, the directory's `collections` row, and any `collection_directories` rows referencing this directory, and deletes cache files on disk. |
 
 Soft remove returns `204 No Content`.
 
@@ -70,15 +68,20 @@ POST errors: `path_not_absolute`, `path_not_found`, `path_not_a_directory`, `pat
 
 ## Collections
 
+Custom collections are named unions of one or more directories. Their video
+membership is computed on read from those directories. Per-video curation is
+not supported — that is deferred to a future playlists feature.
+
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/collections` | `?kind=custom\|directory` filter optional. |
-| POST | `/api/collections` | Body `{ name }`. Creates a custom collection. |
+| POST | `/api/collections` | Body `{ name, directory_ids?: [int, …] }`. Creates a custom collection and (optionally) seeds it with the given directories. Each directory must exist and not be soft-removed. |
 | PATCH | `/api/collections/:id` | Body `{ name }`. Rename. |
 | DELETE | `/api/collections/:id` | Custom only. Returns 400 for directory collections. |
-| GET | `/api/collections/:id/videos` | Videos in collection. |
-| POST | `/api/collections/:id/videos` | Body `{ video_id }`. Custom only. |
-| DELETE | `/api/collections/:id/videos/:video_id` | Custom only. |
+| GET | `/api/collections/:id/videos` | Videos in the collection (computed on read). |
+| GET | `/api/collections/:id/directories` | Directories included in a custom collection. Returns `[]` for directory collections. |
+| POST | `/api/collections/:id/directories` | Body `{ directory_id }`. Custom only. 400 if the directory is unknown or soft-removed. |
+| DELETE | `/api/collections/:cid/directories/:did` | Custom only. Removes the link; videos and history are unaffected. |
 | GET | `/api/collections/:id/random` | `{ video_id }` or 404 if empty. |
 
 ## Videos

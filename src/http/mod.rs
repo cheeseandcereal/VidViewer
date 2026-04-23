@@ -128,11 +128,16 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route(
             "/api/collections/:id/videos",
-            axum::routing::get(api::list_collection_videos).post(api::add_video_to_collection),
+            axum::routing::get(api::list_collection_videos),
         )
         .route(
-            "/api/collections/:cid/videos/:vid",
-            axum::routing::delete(api::remove_video_from_collection),
+            "/api/collections/:id/directories",
+            axum::routing::get(api::list_collection_directories)
+                .post(api::add_directory_to_collection),
+        )
+        .route(
+            "/api/collections/:cid/directories/:did",
+            axum::routing::delete(api::remove_directory_from_collection),
         )
         .route(
             "/api/collections/:id/random",

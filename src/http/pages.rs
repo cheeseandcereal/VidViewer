@@ -85,6 +85,8 @@ pub async fn home(State(state): State<AppState>) -> Response {
 struct CollectionTemplate {
     collection: Collection,
     videos: Vec<VideoCard>,
+    /// Only populated for custom collections; directory collections leave this empty.
+    member_directories: Vec<collections::CollectionDirectory>,
 }
 
 pub async fn collection_page(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
@@ -101,7 +103,18 @@ pub async fn collection_page(State(state): State<AppState>, Path(id): Path<i64>)
     let videos = collections::videos_in(&state.pool, cid)
         .await
         .unwrap_or_default();
-    render(CollectionTemplate { collection, videos })
+    let member_directories = if matches!(collection.kind, collections::Kind::Custom) {
+        collections::directories_in(&state.pool, cid)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    render(CollectionTemplate {
+        collection,
+        videos,
+        member_directories,
+    })
 }
 
 #[derive(Template)]

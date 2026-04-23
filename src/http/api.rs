@@ -323,13 +323,16 @@ pub async fn list_collections(
 #[derive(Debug, Deserialize)]
 pub struct CreateCollectionReq {
     pub name: String,
+    #[serde(default)]
+    pub directory_ids: Vec<i64>,
 }
 
 pub async fn create_collection(
     State(state): State<AppState>,
     Json(req): Json<CreateCollectionReq>,
 ) -> Result<Response, ApiError> {
-    let c = collections::create_custom(&state.pool, &state.clock, &req.name).await?;
+    let dir_ids: Vec<DirectoryId> = req.directory_ids.into_iter().map(DirectoryId).collect();
+    let c = collections::create_custom(&state.pool, &state.clock, &req.name, &dir_ids).await?;
     Ok((StatusCode::CREATED, Json(c)).into_response())
 }
 
@@ -363,31 +366,45 @@ pub async fn list_collection_videos(
     Ok(Json(v).into_response())
 }
 
-#[derive(Debug, Deserialize)]
-pub struct CollectionVideoReq {
-    pub video_id: String,
-}
-
-pub async fn add_video_to_collection(
+pub async fn list_collection_directories(
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
-    Json(req): Json<CollectionVideoReq>,
 ) -> Result<Response, ApiError> {
-    collections::add_video(
+    let v = collections::directories_in(&state.pool, CollectionId(id)).await?;
+    Ok(Json(v).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CollectionDirectoryReq {
+    pub directory_id: i64,
+}
+
+pub async fn add_directory_to_collection(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    Json(req): Json<CollectionDirectoryReq>,
+) -> Result<Response, ApiError> {
+    collections::add_directory(
         &state.pool,
         &state.clock,
         CollectionId(id),
-        &VideoId(req.video_id),
+        DirectoryId(req.directory_id),
     )
     .await?;
     Ok((StatusCode::CREATED, ()).into_response())
 }
 
-pub async fn remove_video_from_collection(
+pub async fn remove_directory_from_collection(
     State(state): State<AppState>,
-    AxPath((cid, vid)): AxPath<(i64, String)>,
+    AxPath((cid, did)): AxPath<(i64, i64)>,
 ) -> Result<Response, ApiError> {
-    collections::remove_video(&state.pool, CollectionId(cid), &VideoId(vid)).await?;
+    collections::remove_directory(
+        &state.pool,
+        &state.clock,
+        CollectionId(cid),
+        DirectoryId(did),
+    )
+    .await?;
     Ok((StatusCode::NO_CONTENT, ()).into_response())
 }
 
