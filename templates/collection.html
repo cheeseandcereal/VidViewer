@@ -44,7 +44,11 @@
 <div class="video-grid" data-collection-id="{{ collection.id }}">
   {% for v in videos %}
     <a class="video-card{% if v.missing %} missing{% endif %}" href="/videos/{{ v.id }}?cid={{ collection.id }}">
-      <div class="video-thumb">
+      <div class="video-thumb hover-scrub"
+           data-video-id="{{ v.id }}"
+           data-preview-ok="{% if v.preview_ok %}1{% else %}0{% endif %}"
+           data-duration="{{ v.duration_secs.unwrap_or(0.0) }}"
+           data-cache-bust="{{ v.updated_at_epoch }}">
         {% if v.thumbnail_ok %}
           <img src="/thumbs/{{ v.id }}.jpg?v={{ v.updated_at_epoch }}" alt="" loading="lazy">
         {% else %}
@@ -65,5 +69,6 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/hover_scrub.js" defer></script>
 <script src="/static/collection.js" defer></script>
 {% endblock %}
