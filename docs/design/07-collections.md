@@ -37,6 +37,10 @@ Each card shows name, video count, and a small mosaic of recent thumbnails.
 
 When a directory is soft-removed (`directories.removed = 1`):
 
+- Any in-flight background jobs for videos in this directory are **aborted**:
+  the worker task is cancelled via `AbortHandle`, and the ffmpeg/ffprobe child
+  process is terminated via `kill_on_drop(true)` on the `Command`. Aborted job
+  rows are deleted outright.
 - Its directory collection is flagged `hidden = 1` and disappears from Home.
 - All `collection_videos` rows for that collection are deleted.
 - All videos in that directory are flagged `missing = 1`.
@@ -57,6 +61,8 @@ When re-added:
 Hard-remove is an explicit user action (`DELETE /api/directories/:id?mode=hard`).
 It is irreversible:
 
+- Any in-flight background jobs for videos in this directory are **aborted** and
+  their child processes terminated, same as soft-remove.
 - All thumbnail and preview cache files for videos in the directory are removed
   from disk (best-effort).
 - All `jobs` rows referencing those videos are deleted.

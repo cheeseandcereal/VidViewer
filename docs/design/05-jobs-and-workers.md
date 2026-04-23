@@ -40,6 +40,21 @@ Separating preview generation prevents long tile-sheet encodes from starving qui
 - A failed `probe` blocks enqueuing of `thumbnail`/`preview` for that video; those remain absent.
 - The user can trigger a rescan for the directory; if nothing changed on disk, the scanner does not re-enqueue. A dedicated "retry failed jobs" endpoint can be added post-MVP.
 
+## Cancellation
+
+- Each lane spawns the actual per-job work as a separate tokio task and registers
+  its `AbortHandle` plus `video_id` in the shared `JobRegistry` (kept on
+  `AppState::job_registry`).
+- When a directory is removed (soft or hard), the HTTP handler looks up all
+  `video_id`s in the directory and calls `JobRegistry::cancel_for_videos`. Each
+  matching task is aborted; because every `tokio::process::Command` in
+  `video_tool` is built with `kill_on_drop(true)`, the ffmpeg/ffprobe child
+  process is terminated when the worker future is dropped mid-await.
+- Aborted rows are deleted from the `jobs` table outright. The worker loop also
+  deletes them defensively when it observes the `JoinError::cancelled`.
+- `jobs` rows have no FK to `videos`; hard-remove explicitly cleans them up via
+  `DELETE FROM jobs WHERE video_id IN (...)`.
+
 ## Adding a job kind
 
 See [`../agents/adding-a-job-kind.md`](../agents/adding-a-job-kind.md).

@@ -9,6 +9,7 @@ use sqlx::{Row, SqliteConnection, SqlitePool};
 use crate::ids::VideoId;
 
 pub mod preview_plan;
+pub mod registry;
 pub mod worker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

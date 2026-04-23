@@ -85,6 +85,7 @@ impl VideoTool for FfmpegTool {
             .arg(path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .output()
             .await
             .with_context(|| format!("spawning ffprobe for {}", path.display()))?;
@@ -121,6 +122,7 @@ impl VideoTool for FfmpegTool {
             .arg(dst)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .status()
             .await
             .with_context(|| format!("spawning ffmpeg for thumbnail of {}", src.display()))?;
@@ -354,6 +356,7 @@ async fn run_ffmpeg_silent(args: &[std::ffi::OsString]) -> Result<bool> {
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .status()
         .await
         .context("spawning ffmpeg")?;

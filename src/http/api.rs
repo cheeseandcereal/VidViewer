@@ -90,27 +90,93 @@ pub async fn delete_directory(
     Query(q): Query<DeleteDirectoryQuery>,
 ) -> Response {
     let mode = q.mode.as_deref().unwrap_or("soft");
+    if mode != "soft" && mode != "hard" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "bad_mode", "message": "mode must be 'soft' or 'hard'"})),
+        )
+            .into_response();
+    }
+
+    // Abort any in-flight jobs for videos in this directory before we mutate
+    // state. This terminates the underlying ffmpeg/ffprobe processes via
+    // `kill_on_drop(true)` on the Command and prevents a running worker from
+    // completing its work on a row we're about to soft-delete or cascade-delete.
+    if let Err(err) = cancel_running_jobs_for_directory(&state, DirectoryId(id)).await {
+        tracing::warn!(
+            directory_id = id,
+            error = %err,
+            "failed to cancel in-flight jobs for directory (continuing with remove)"
+        );
+    }
+
     match mode {
-        "soft" => match directories::soft_remove(&state.pool, &state.clock, DirectoryId(id)).await
-        {
-            Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
-            Err(err) => internal(err),
-        },
+        "soft" => {
+            match directories::soft_remove(&state.pool, &state.clock, DirectoryId(id)).await {
+                Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
+                Err(err) => internal(err),
+            }
+        }
         "hard" => {
             let cache = scanner::CachePaths::from_config(&state.config);
-            match directories::hard_remove(&state.pool, &state.clock, &cache, DirectoryId(id))
-                .await
+            match directories::hard_remove(&state.pool, &state.clock, &cache, DirectoryId(id)).await
             {
                 Ok(report) => (StatusCode::OK, Json(report)).into_response(),
                 Err(err) => internal(err),
             }
         }
-        _ => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "bad_mode", "message": "mode must be 'soft' or 'hard'"})),
-        )
-            .into_response(),
+        _ => unreachable!("mode validated above"),
     }
+}
+
+/// Look up every video in the directory, ask the job registry to abort any
+/// running job for those videos, and delete the aborted rows from the `jobs`
+/// table so they don't linger as `running`.
+async fn cancel_running_jobs_for_directory(
+    state: &AppState,
+    dir_id: DirectoryId,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use sqlx::Row;
+
+    let rows = sqlx::query("SELECT id FROM videos WHERE directory_id = ?")
+        .bind(dir_id.raw())
+        .fetch_all(&state.pool)
+        .await
+        .context("listing videos for job cancellation")?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let video_ids: Vec<VideoId> = rows
+        .into_iter()
+        .map(|r| VideoId(r.get::<String, _>(0)))
+        .collect();
+
+    let aborted = state.job_registry.cancel_for_videos(&video_ids);
+    if aborted.is_empty() {
+        return Ok(());
+    }
+
+    // Remove the aborted rows from the `jobs` table. The worker loop also
+    // deletes them when it observes the JoinError::cancelled, but we delete
+    // them here defensively so a subsequent operation in the same transactional
+    // flow (like hard-remove) sees a clean state.
+    let placeholders = vec!["?"; aborted.len()].join(",");
+    let sql = format!("DELETE FROM jobs WHERE id IN ({placeholders})");
+    let mut q = sqlx::query(&sql);
+    for id in &aborted {
+        q = q.bind(id);
+    }
+    q.execute(&state.pool)
+        .await
+        .context("deleting aborted job rows")?;
+
+    tracing::info!(
+        directory_id = %dir_id,
+        aborted_jobs = aborted.len(),
+        "aborted in-flight jobs for directory"
+    );
+    Ok(())
 }
 
 fn add_error_response(err: AddError) -> Response {

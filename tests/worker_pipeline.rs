@@ -64,6 +64,7 @@ async fn probe_enqueues_thumbnail_and_preview() {
         preview_target_count: 100,
         thumb_dir: cfg.thumb_cache_dir(),
         preview_dir: cfg.preview_cache_dir(),
+        registry: vidviewer::jobs::registry::JobRegistry::new(),
     };
     let _handles = workers.spawn_all(1, 1);
 

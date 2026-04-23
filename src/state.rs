@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use crate::{
     clock::{self, ClockRef},
     config::Config,
+    jobs::registry::JobRegistry,
     player::{self, PlayerRef},
     scanner::ScanHandle,
     video_tool::{self, VideoToolRef},
@@ -26,6 +27,7 @@ pub struct AppState {
     pub scans: Arc<RwLock<ScanRegistry>>,
     pub player: PlayerRef,
     pub video_tool: VideoToolRef,
+    pub job_registry: JobRegistry,
 }
 
 impl AppState {
@@ -39,6 +41,7 @@ impl AppState {
             scans: Arc::new(RwLock::new(ScanRegistry::default())),
             player,
             video_tool,
+            job_registry: JobRegistry::new(),
         }
     }
 
@@ -52,6 +55,7 @@ impl AppState {
             scans: Arc::new(RwLock::new(ScanRegistry::default())),
             player: Arc::new(player::MockPlayer::new()),
             video_tool: Arc::new(video_tool::MockVideoTool::new()),
+            job_registry: JobRegistry::new(),
         }
     }
 }

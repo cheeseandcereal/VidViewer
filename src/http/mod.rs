@@ -61,6 +61,7 @@ pub async fn serve(state: AppState) -> Result<()> {
         preview_target_count: state.config.preview_target_count,
         thumb_dir: state.config.thumb_cache_dir(),
         preview_dir: state.config.preview_cache_dir(),
+        registry: state.job_registry.clone(),
     };
     let _worker_handles = workers.spawn_all(
         state.config.worker_concurrency,

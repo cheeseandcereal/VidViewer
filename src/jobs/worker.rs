@@ -30,6 +30,7 @@ pub struct Workers {
     pub preview_target_count: u32,
     pub thumb_dir: PathBuf,
     pub preview_dir: PathBuf,
+    pub registry: crate::jobs::registry::JobRegistry,
 }
 
 impl Workers {
@@ -69,10 +70,25 @@ impl Workers {
                         video_id = %job.video_id,
                         "job started"
                     );
-                    let result = self.process(&job).await;
+
+                    // Spawn the actual work as a separate task so we have an
+                    // `AbortHandle` to expose via the registry. Abort propagates
+                    // down to any awaited `tokio::process::Command::status()`,
+                    // and our `kill_on_drop(true)` ensures the ffmpeg/ffprobe
+                    // child is terminated as the future is dropped.
+                    let w = self.clone();
+                    let job_clone = job.clone();
+                    let task: tokio::task::JoinHandle<Result<()>> =
+                        tokio::spawn(async move { w.process(&job_clone).await });
+                    let abort = task.abort_handle();
+                    self.registry.register(job.id, job.video_id.clone(), abort);
+
+                    let outcome = task.await;
+                    self.registry.deregister(job.id);
+
                     let elapsed_ms = started.elapsed().as_millis() as u64;
-                    match result {
-                        Ok(()) => {
+                    match outcome {
+                        Ok(Ok(())) => {
                             info!(
                                 job_id = job.id,
                                 kind = job.kind.as_str(),
@@ -82,7 +98,7 @@ impl Workers {
                             );
                             let _ = self.mark(job.id, Status::Done, None).await;
                         }
-                        Err(err) => {
+                        Ok(Err(err)) => {
                             let msg = format!("{err:#}");
                             error!(
                                 job_id = job.id,
@@ -91,6 +107,35 @@ impl Workers {
                                 elapsed_ms,
                                 error = %msg,
                                 "job failed"
+                            );
+                            let _ = self.mark(job.id, Status::Failed, Some(&msg)).await;
+                        }
+                        Err(join_err) if join_err.is_cancelled() => {
+                            // Aborted by an external action (directory remove).
+                            // Remove the row outright so it doesn't linger as
+                            // `running` and doesn't reappear after reconciliation.
+                            info!(
+                                job_id = job.id,
+                                kind = job.kind.as_str(),
+                                video_id = %job.video_id,
+                                elapsed_ms,
+                                "job cancelled (aborted)"
+                            );
+                            let _ = sqlx::query("DELETE FROM jobs WHERE id = ?")
+                                .bind(job.id)
+                                .execute(&self.pool)
+                                .await;
+                        }
+                        Err(join_err) => {
+                            // Panic inside the worker task.
+                            let msg = format!("{join_err}");
+                            error!(
+                                job_id = job.id,
+                                kind = job.kind.as_str(),
+                                video_id = %job.video_id,
+                                elapsed_ms,
+                                error = %msg,
+                                "job task panicked"
                             );
                             let _ = self.mark(job.id, Status::Failed, Some(&msg)).await;
                         }
