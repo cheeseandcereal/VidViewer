@@ -119,9 +119,18 @@ pub async fn delete_directory(
     }
 }
 
-/// Look up every video in the directory, ask the job registry to abort any
-/// running job for those videos, and delete the aborted rows from the `jobs`
-/// table so they don't linger as `running`.
+/// Purge the jobs table of any pending or running work for videos in this
+/// directory, and abort any in-flight worker tasks processing them.
+///
+/// Order matters: we DELETE pending rows first so no worker can claim a new
+/// one after this function returns. Then we cancel running jobs via the
+/// registry (which aborts the task and — via `kill_on_drop(true)` on every
+/// ffmpeg Command — terminates the OS process immediately).
+///
+/// This is called before the directory's own state is mutated. The combination
+/// is race-free: once this returns, the jobs table contains no `pending` or
+/// `running` rows for videos in this directory, and no worker task is actively
+/// processing one either.
 async fn cancel_running_jobs_for_directory(
     state: &AppState,
     dir_id: DirectoryId,
@@ -129,39 +138,63 @@ async fn cancel_running_jobs_for_directory(
     use anyhow::Context;
     use sqlx::Row;
 
+    // 1. Delete any pending rows first. This closes the door on any idle
+    //    worker that would otherwise claim one while we're cancelling runners.
+    //    `status = 'pending'` is the only status that a worker can transition
+    //    TO `running`, so after this DELETE no new ffmpeg can be spawned via
+    //    the normal claim path for videos in this directory.
+    let cancelled_pending = sqlx::query(
+        "DELETE FROM jobs \
+         WHERE status = 'pending' \
+         AND video_id IN (SELECT id FROM videos WHERE directory_id = ?)",
+    )
+    .bind(dir_id.raw())
+    .execute(&state.pool)
+    .await
+    .context("deleting pending jobs for directory")?
+    .rows_affected();
+
+    // 2. Collect video ids so we can signal the registry to abort any worker
+    //    tasks currently running jobs for those videos.
     let rows = sqlx::query("SELECT id FROM videos WHERE directory_id = ?")
         .bind(dir_id.raw())
         .fetch_all(&state.pool)
         .await
         .context("listing videos for job cancellation")?;
-    if rows.is_empty() {
-        return Ok(());
-    }
     let video_ids: Vec<VideoId> = rows
         .into_iter()
         .map(|r| VideoId(r.get::<String, _>(0)))
         .collect();
 
-    let aborted = state.job_registry.cancel_for_videos(&video_ids);
-    if aborted.is_empty() {
-        return Ok(());
+    let aborted = if video_ids.is_empty() {
+        Vec::new()
+    } else {
+        state.job_registry.cancel_for_videos(&video_ids)
+    };
+
+    // 3. Remove the aborted rows from the `jobs` table. The worker loop also
+    //    deletes them when it observes the JoinError::cancelled, but we delete
+    //    them here defensively so the caller sees a clean `jobs` state.
+    if !aborted.is_empty() {
+        let placeholders = vec!["?"; aborted.len()].join(",");
+        let sql = format!("DELETE FROM jobs WHERE id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for id in &aborted {
+            q = q.bind(id);
+        }
+        q.execute(&state.pool)
+            .await
+            .context("deleting aborted job rows")?;
     }
 
-    let placeholders = vec!["?"; aborted.len()].join(",");
-    let sql = format!("DELETE FROM jobs WHERE id IN ({placeholders})");
-    let mut q = sqlx::query(&sql);
-    for id in &aborted {
-        q = q.bind(id);
+    if cancelled_pending + aborted.len() as u64 > 0 {
+        tracing::info!(
+            directory_id = %dir_id,
+            cancelled_pending,
+            aborted_running = aborted.len(),
+            "cancelled jobs for directory"
+        );
     }
-    q.execute(&state.pool)
-        .await
-        .context("deleting aborted job rows")?;
-
-    tracing::info!(
-        directory_id = %dir_id,
-        aborted_jobs = aborted.len(),
-        "aborted in-flight jobs for directory"
-    );
     Ok(())
 }
 

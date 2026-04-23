@@ -187,10 +187,45 @@ impl Workers {
     }
 
     async fn process(&self, job: &Job, cancel: &CancellationToken) -> Result<()> {
+        // Pre-flight: verify this job is still relevant before spawning any
+        // ffmpeg. There's a small window between `claim()` (which atomically
+        // transitions the row to 'running') and registering the AbortHandle
+        // in the registry. During that window, a directory-remove request can
+        // delete pending jobs and cancel the registry — but since we aren't
+        // registered yet, our task won't be aborted. This check closes that
+        // race: if the job row has been deleted, or the video's directory has
+        // been soft-removed, we bail cleanly without spawning anything.
+        if !self.job_is_still_relevant(job.id).await? {
+            return Err(anyhow!("job {} is no longer relevant (cancelled)", job.id));
+        }
         match job.kind {
             Kind::Probe => self.run_probe(&job.video_id).await,
             Kind::Thumbnail => self.run_thumbnail(&job.video_id).await,
             Kind::Preview => self.run_preview(&job.video_id, cancel).await,
+        }
+    }
+
+    /// Returns true if the job's row still exists and its video's directory
+    /// is not soft-removed. A `false` return means the job has been cancelled
+    /// out from under us by a concurrent directory-remove.
+    async fn job_is_still_relevant(&self, job_id: i64) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT d.removed \
+             FROM jobs j \
+             JOIN videos v ON v.id = j.video_id \
+             JOIN directories d ON d.id = v.directory_id \
+             WHERE j.id = ?",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("pre-flight job relevance check")?;
+        match row {
+            Some(r) => {
+                let removed: i64 = r.get("removed");
+                Ok(removed == 0)
+            }
+            None => Ok(false),
         }
     }
 
