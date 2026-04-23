@@ -1,20 +1,28 @@
 -- 0001_initial.sql
 -- Initial schema for VidViewer.
 --
--- Append-only: never edit this file after commit.
--- See docs/design/03-data-model.md for a narrative description.
+-- Normally append-only; this file was overwritten once during pre-release
+-- refactoring. From v0.1 onward, add new migrations rather than edit this one.
+--
+-- See docs/design/03-data-model.md for a narrative description of each table.
 
 PRAGMA foreign_keys = ON;
 
+-- User-configured root directories. `removed = 1` is a soft-remove state:
+-- the row is skipped by the scanner but preserved so watch history and
+-- custom-collection memberships survive.
 CREATE TABLE directories (
     id        INTEGER PRIMARY KEY,
     path      TEXT    NOT NULL UNIQUE,
     label     TEXT    NOT NULL,
     added_at  TEXT    NOT NULL,
-    removed   INTEGER NOT NULL DEFAULT 0
+    removed   INTEGER NOT NULL DEFAULT 0 CHECK (removed IN (0, 1))
 );
 CREATE INDEX idx_directories_removed ON directories(removed);
 
+-- Every video file ever indexed. `missing = 1` means the file is no longer
+-- on disk; we keep the row so custom-collection memberships and watch history
+-- survive a temporary absence (disk unmount, cache cleared, etc.).
 CREATE TABLE videos (
     id             TEXT    PRIMARY KEY,
     directory_id   INTEGER NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
@@ -26,9 +34,9 @@ CREATE TABLE videos (
     width          INTEGER,
     height         INTEGER,
     codec          TEXT,
-    thumbnail_ok   INTEGER NOT NULL DEFAULT 0,
-    preview_ok     INTEGER NOT NULL DEFAULT 0,
-    missing        INTEGER NOT NULL DEFAULT 0,
+    thumbnail_ok   INTEGER NOT NULL DEFAULT 0 CHECK (thumbnail_ok IN (0, 1)),
+    preview_ok     INTEGER NOT NULL DEFAULT 0 CHECK (preview_ok IN (0, 1)),
+    missing        INTEGER NOT NULL DEFAULT 0 CHECK (missing IN (0, 1)),
     created_at     TEXT    NOT NULL,
     updated_at     TEXT    NOT NULL,
     UNIQUE(directory_id, relative_path)
@@ -36,18 +44,23 @@ CREATE TABLE videos (
 CREATE INDEX idx_videos_updated_at ON videos(updated_at);
 CREATE INDEX idx_videos_missing    ON videos(missing);
 
+-- Collections are either auto-managed ('directory' kind, tied to a directories
+-- row) or user-curated ('custom'). `hidden = 1` is the soft-remove companion
+-- for directory collections.
 CREATE TABLE collections (
     id           INTEGER PRIMARY KEY,
     name         TEXT    NOT NULL,
     kind         TEXT    NOT NULL CHECK (kind IN ('directory', 'custom')),
     directory_id INTEGER REFERENCES directories(id) ON DELETE CASCADE,
-    hidden       INTEGER NOT NULL DEFAULT 0,
+    hidden       INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
     created_at   TEXT    NOT NULL,
     updated_at   TEXT    NOT NULL,
     UNIQUE(kind, directory_id)
 );
 CREATE INDEX idx_collections_hidden ON collections(hidden);
 
+-- Materialized membership. The scanner maintains rows for directory
+-- collections; users maintain rows for custom collections.
 CREATE TABLE collection_videos (
     collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
     video_id      TEXT    NOT NULL REFERENCES videos(id)      ON DELETE CASCADE,
@@ -57,15 +70,18 @@ CREATE TABLE collection_videos (
 );
 CREATE INDEX idx_collvids_video ON collection_videos(video_id);
 
+-- One row per video with at least one playback event. `completed = 1` is set
+-- when position reaches >= 90% of duration at end-of-session.
 CREATE TABLE watch_history (
     video_id        TEXT    PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
     last_watched_at TEXT    NOT NULL,
     position_secs   REAL    NOT NULL DEFAULT 0,
-    completed       INTEGER NOT NULL DEFAULT 0,
+    completed       INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
     watch_count     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_history_last_watched ON watch_history(last_watched_at DESC);
 
+-- Background work queue. See docs/design/05-jobs-and-workers.md.
 CREATE TABLE jobs (
     id          INTEGER PRIMARY KEY,
     kind        TEXT    NOT NULL CHECK (kind IN ('probe', 'thumbnail', 'preview')),
@@ -75,14 +91,17 @@ CREATE TABLE jobs (
     created_at  TEXT    NOT NULL,
     updated_at  TEXT    NOT NULL
 );
-CREATE INDEX idx_jobs_status ON jobs(status);
+CREATE INDEX idx_jobs_status   ON jobs(status);
+CREATE INDEX idx_jobs_video_id ON jobs(video_id);
 
--- At most one outstanding (pending or running) job per (kind, video_id). This is
--- the DB-level backstop for the idempotent enqueue path in src/jobs/mod.rs.
+-- At most one outstanding (pending or running) job per (kind, video_id). This
+-- is the DB-level backstop for the idempotent enqueue path in src/jobs/mod.rs.
 CREATE UNIQUE INDEX idx_jobs_outstanding_unique
     ON jobs(kind, video_id)
     WHERE status IN ('pending', 'running');
 
+-- Single-row bag of small UI persistence (e.g. the last path visited in the
+-- directory picker). The CHECK constraint enforces the singleton property.
 CREATE TABLE ui_state (
     id                INTEGER PRIMARY KEY CHECK (id = 1),
     last_browsed_path TEXT

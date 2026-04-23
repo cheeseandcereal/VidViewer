@@ -16,7 +16,8 @@ CREATE TABLE directories (
     path      TEXT    NOT NULL UNIQUE,      -- absolute path
     label     TEXT    NOT NULL,             -- defaults to path, user-editable
     added_at  TEXT    NOT NULL,             -- RFC3339 UTC
-    removed   INTEGER NOT NULL DEFAULT 0    -- soft-remove flag
+    removed   INTEGER NOT NULL DEFAULT 0    -- 0/1, CHECK-constrained
+        CHECK (removed IN (0, 1))
 );
 CREATE INDEX idx_directories_removed ON directories(removed);
 ```
@@ -35,9 +36,9 @@ CREATE TABLE videos (
     width          INTEGER,
     height         INTEGER,
     codec          TEXT,
-    thumbnail_ok   INTEGER NOT NULL DEFAULT 0,
-    preview_ok     INTEGER NOT NULL DEFAULT 0,
-    missing        INTEGER NOT NULL DEFAULT 0,
+    thumbnail_ok   INTEGER NOT NULL DEFAULT 0 CHECK (thumbnail_ok IN (0, 1)),
+    preview_ok     INTEGER NOT NULL DEFAULT 0 CHECK (preview_ok IN (0, 1)),
+    missing        INTEGER NOT NULL DEFAULT 0 CHECK (missing IN (0, 1)),
     created_at     TEXT    NOT NULL,
     updated_at     TEXT    NOT NULL,
     UNIQUE(directory_id, relative_path)
@@ -52,9 +53,9 @@ CREATE INDEX idx_videos_missing    ON videos(missing);
 CREATE TABLE collections (
     id           INTEGER PRIMARY KEY,
     name         TEXT    NOT NULL,
-    kind         TEXT    NOT NULL,          -- 'directory' | 'custom'
+    kind         TEXT    NOT NULL CHECK (kind IN ('directory', 'custom')),
     directory_id INTEGER REFERENCES directories(id) ON DELETE CASCADE,
-    hidden       INTEGER NOT NULL DEFAULT 0,
+    hidden       INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1)),
     created_at   TEXT    NOT NULL,
     updated_at   TEXT    NOT NULL,
     UNIQUE(kind, directory_id)
@@ -85,7 +86,7 @@ CREATE TABLE watch_history (
     video_id        TEXT PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
     last_watched_at TEXT    NOT NULL,
     position_secs   REAL    NOT NULL DEFAULT 0,
-    completed       INTEGER NOT NULL DEFAULT 0,
+    completed       INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
     watch_count     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_history_last_watched ON watch_history(last_watched_at DESC);
@@ -96,14 +97,15 @@ CREATE INDEX idx_history_last_watched ON watch_history(last_watched_at DESC);
 ```sql
 CREATE TABLE jobs (
     id          INTEGER PRIMARY KEY,
-    kind        TEXT    NOT NULL,           -- 'probe' | 'thumbnail' | 'preview'
+    kind        TEXT    NOT NULL CHECK (kind IN ('probe', 'thumbnail', 'preview')),
     video_id    TEXT    NOT NULL,
-    status      TEXT    NOT NULL,           -- 'pending' | 'running' | 'done' | 'failed'
+    status      TEXT    NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
     error       TEXT,
     created_at  TEXT    NOT NULL,
     updated_at  TEXT    NOT NULL
 );
-CREATE INDEX idx_jobs_status ON jobs(status);
+CREATE INDEX idx_jobs_status   ON jobs(status);
+CREATE INDEX idx_jobs_video_id ON jobs(video_id);
 
 -- At most one outstanding (pending or running) job per (kind, video_id).
 -- Enforced at the DB layer as a safety net for the idempotent enqueue path.
