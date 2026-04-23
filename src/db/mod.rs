@@ -185,7 +185,7 @@ async fn integrity_check(pool: &SqlitePool) -> Result<()> {
         "directories",
         "videos",
         "collections",
-        "collection_videos",
+        "collection_directories",
         "watch_history",
         "jobs",
         "ui_state",

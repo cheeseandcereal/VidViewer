@@ -1,7 +1,5 @@
 # 03 — Data model
 
-Last updated: 2026-04-22
-
 All application state lives in SQLite at `~/.local/share/vidviewer/vidviewer.db`.
 
 `PRAGMA encoding = 'UTF-8'` is set at DB init.
@@ -63,20 +61,22 @@ CREATE TABLE collections (
 CREATE INDEX idx_collections_hidden ON collections(hidden);
 ```
 
-### `collection_videos`
+### `collection_directories`
 
-Materialized membership for both directory and custom collections.
-The scanner maintains rows for directory collections; users maintain rows for custom collections.
+Directories included in a custom collection. Directory collections do not use
+this table; their video membership is implicit (`videos.directory_id =
+collections.directory_id`). Custom collections read their videos as the union
+of videos in these directories, computed on every read — there is no
+materialized membership table.
 
 ```sql
-CREATE TABLE collection_videos (
+CREATE TABLE collection_directories (
     collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
-    video_id      TEXT    NOT NULL REFERENCES videos(id)      ON DELETE CASCADE,
+    directory_id  INTEGER NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
     added_at      TEXT    NOT NULL,
-    position      INTEGER,                  -- nullable; for future manual ordering
-    PRIMARY KEY (collection_id, video_id)
+    PRIMARY KEY (collection_id, directory_id)
 );
-CREATE INDEX idx_collvids_video ON collection_videos(video_id);
+CREATE INDEX idx_colldirs_directory ON collection_directories(directory_id);
 ```
 
 ### `watch_history`
@@ -131,13 +131,22 @@ CREATE TABLE ui_state (
 - `(directory_id, relative_path)` is the scanner's identity key for videos.
 - `video_id` is stable across file content changes. URLs to derived assets include `?v=<updated_at_epoch>` to bust caches.
 - Directory collections (`kind = 'directory'`) can only be mutated through their `name` field.
-- When a video is soft-deleted (`missing = 1`) its `collection_videos` row for its directory collection is deleted; custom collection rows are preserved.
-- Soft-removed directories (`removed = 1`) are skipped by the scanner; their directory collection has `hidden = 1`.
-- Watch history is preserved under soft-remove. Hard-remove (explicit user action
-  via the `mode=hard` API path) cascades through FKs: deleting a `directories`
-  row removes its `videos`, which in turn cascades to `collection_videos`,
-  `watch_history`, and the directory's own `collections` row. `jobs` rows have
-  no FK and are cleaned up manually by the hard-remove implementation.
+- Collection membership is computed on read, never materialized. A directory
+  collection's videos are those with `videos.directory_id =
+  collections.directory_id`; a custom collection's videos are the union of
+  videos in the directories listed in `collection_directories`. Videos flagged
+  `missing = 1` are excluded from all collection listings.
+- Soft-removed directories (`removed = 1`) are skipped by the scanner; their
+  directory collection has `hidden = 1`. Any `collection_directories` rows
+  linking a soft-removed directory to a custom collection remain intact, so
+  re-adding the directory restores its contribution to those collections
+  automatically.
+- Watch history is preserved under soft-remove. Hard-remove (explicit user
+  action via the `mode=hard` API path) cascades through FKs: deleting a
+  `directories` row removes its `videos`, which cascade to `watch_history`, the
+  directory's own `collections` row, and any `collection_directories` rows
+  referencing that directory. `jobs` rows have no FK and are cleaned up
+  manually by the hard-remove implementation.
 
 ## Migrations
 

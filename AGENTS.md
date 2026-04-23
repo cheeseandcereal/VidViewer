@@ -83,12 +83,13 @@ These must remain true; violating them means a bug:
 1. `(directory_id, relative_path)` uniquely identifies a video row.
 2. `video_id` is stable across file content changes — only the content hash (`size`, `mtime`) and derived assets change. URLs to thumbnails and previews are cache-busted via `?v=<updated_at_epoch>`.
 3. Directory collections (`collections.kind = 'directory'`) can only be mutated via their `name` field. All other mutations must return `400` at the API boundary.
-4. A video marked `missing = 1` is removed from its directory collection's `collection_videos` rows but remains in any custom collection memberships (rendered with a "missing" badge).
-5. Soft-removed directories (`directories.removed = 1`) are skipped by the scanner. Their directory collection is flagged `hidden = 1` and not shown in listings. Re-adding the same path un-hides and un-removes in place.
+4. Collection membership is computed on read, never materialized. A directory collection's videos are those with `videos.directory_id = collections.directory_id`; a custom collection's videos are the union of videos in the directories listed in `collection_directories` for that collection. Videos flagged `missing = 1` are excluded from all listings.
+5. Soft-removed directories (`directories.removed = 1`) are skipped by the scanner. Their directory collection is flagged `hidden = 1` and not shown in listings. Re-adding the same path un-hides and un-removes in place. Any `collection_directories` rows linking a soft-removed directory to a custom collection remain intact, so re-adding the directory restores its contribution to those collections automatically.
 6. Watch history (`watch_history` rows) is preserved under **soft remove**. **Hard
    remove** of a directory (user-confirmed destructive action) cascades through
-   `videos` → `watch_history`, `collection_videos`, and the directory's `collections`
-   row, and also deletes cached thumbnails and previews for those videos from disk.
+   `videos` → `watch_history`, the directory's `collections` row, and any
+   `collection_directories` rows referencing that directory, and also deletes
+   cached thumbnails and previews for those videos from disk.
 
 ## What not to do
 

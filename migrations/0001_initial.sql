@@ -1,8 +1,8 @@
 -- 0001_initial.sql
 -- Initial schema for VidViewer.
 --
--- Normally append-only; this file was overwritten once during pre-release
--- refactoring. From v0.1 onward, add new migrations rather than edit this one.
+-- Normally append-only; future schema changes must be added as new
+-- migrations rather than edits to this file.
 --
 -- See docs/design/03-data-model.md for a narrative description of each table.
 
@@ -45,8 +45,10 @@ CREATE INDEX idx_videos_updated_at ON videos(updated_at);
 CREATE INDEX idx_videos_missing    ON videos(missing);
 
 -- Collections are either auto-managed ('directory' kind, tied to a directories
--- row) or user-curated ('custom'). `hidden = 1` is the soft-remove companion
--- for directory collections.
+-- row) or user-curated ('custom'). Custom collections are unions of one or
+-- more directories (see collection_directories below); their video membership
+-- is computed on read. `hidden = 1` is the soft-remove companion for directory
+-- collections.
 CREATE TABLE collections (
     id           INTEGER PRIMARY KEY,
     name         TEXT    NOT NULL,
@@ -59,16 +61,17 @@ CREATE TABLE collections (
 );
 CREATE INDEX idx_collections_hidden ON collections(hidden);
 
--- Materialized membership. The scanner maintains rows for directory
--- collections; users maintain rows for custom collections.
-CREATE TABLE collection_videos (
+-- Directories included in a custom collection. Directory collections do not
+-- use this table; their membership is implicit (videos.directory_id equals
+-- collections.directory_id). Custom collections read their videos as the
+-- union of videos in these directories.
+CREATE TABLE collection_directories (
     collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
-    video_id      TEXT    NOT NULL REFERENCES videos(id)      ON DELETE CASCADE,
+    directory_id  INTEGER NOT NULL REFERENCES directories(id) ON DELETE CASCADE,
     added_at      TEXT    NOT NULL,
-    position      INTEGER,
-    PRIMARY KEY (collection_id, video_id)
+    PRIMARY KEY (collection_id, directory_id)
 );
-CREATE INDEX idx_collvids_video ON collection_videos(video_id);
+CREATE INDEX idx_colldirs_directory ON collection_directories(directory_id);
 
 -- One row per video with at least one playback event. `completed = 1` is set
 -- when position reaches >= 90% of duration at end-of-session.
