@@ -18,6 +18,10 @@
   </div>
   <div class="actions">
     <button type="button" class="primary" id="btn-random" {% if videos.is_empty() %}disabled{% endif %}>🎲 Random</button>
+    <button type="button" id="btn-sort" {% if videos.is_empty() %}disabled{% endif %}
+            aria-label="Toggle sort order" title="Toggle sort order">
+      <span id="btn-sort-label">Z → A</span>
+    </button>
     {% match collection.kind %}
       {% when crate::collections::Kind::Custom %}
         <button type="button" id="btn-rename">Rename</button>

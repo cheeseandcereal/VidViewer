@@ -9,6 +9,65 @@
     const randomBtn = document.getElementById('btn-random');
     const renameBtn = document.getElementById('btn-rename');
     const deleteBtn = document.getElementById('btn-delete');
+    const sortBtn = document.getElementById('btn-sort');
+    const sortLabel = document.getElementById('btn-sort-label');
+
+    // ---- Sort toggle ----
+    //
+    // The server renders videos alphabetically ascending (A -> Z). The toggle
+    // flips the DOM order client-side only — no refetch — and persists the
+    // user's choice in localStorage so it sticks across navigation. Default
+    // direction is descending (Z -> A).
+    const SORT_KEY = 'vv.collection.sortDir';
+    function readSortDir() {
+        try {
+            const v = localStorage.getItem(SORT_KEY);
+            return v === 'asc' ? 'asc' : 'desc';
+        } catch {
+            return 'desc';
+        }
+    }
+    function writeSortDir(dir) {
+        try { localStorage.setItem(SORT_KEY, dir); } catch { /* ignore */ }
+    }
+    function applySort(dir) {
+        if (!grid) return;
+        // Snapshot the children, sort by filename (case-insensitive), then
+        // reattach in the desired order. We read the filename from the card's
+        // `.video-filename` text node to match exactly what the user sees.
+        const cards = Array.from(grid.querySelectorAll('.video-card'));
+        if (!cards.length) return;
+        const keyed = cards.map(card => {
+            const name = (card.querySelector('.video-filename')?.textContent || '').trim();
+            return { card, key: name.toLowerCase() };
+        });
+        keyed.sort((a, b) => {
+            if (a.key < b.key) return dir === 'asc' ? -1 : 1;
+            if (a.key > b.key) return dir === 'asc' ? 1 : -1;
+            return 0;
+        });
+        // Re-attach in sorted order. appendChild on an already-attached node
+        // moves it, so the grid ends up with children in sorted sequence
+        // without any layout thrash.
+        for (const { card } of keyed) grid.appendChild(card);
+    }
+    function updateSortLabel(dir) {
+        if (!sortLabel) return;
+        sortLabel.textContent = dir === 'asc' ? 'A → Z' : 'Z → A';
+    }
+
+    let sortDir = readSortDir();
+    updateSortLabel(sortDir);
+    applySort(sortDir);
+
+    if (sortBtn) {
+        sortBtn.addEventListener('click', () => {
+            sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+            writeSortDir(sortDir);
+            updateSortLabel(sortDir);
+            applySort(sortDir);
+        });
+    }
 
     async function goRandom() {
         if (!cid) return;
