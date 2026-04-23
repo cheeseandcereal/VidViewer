@@ -19,7 +19,7 @@ ffmpeg -ss <T> -i <abs_path> -vframes 1 -vf scale=<thumbnail_width>:-1 <cache>/t
 
 - `T = duration_secs * 0.5` (midpoint of the video). Falls back to `5s` if the duration is
   unknown. Seek before input for speed.
-- `thumbnail_width` from config (default 320).
+- `thumbnail_width` from config (default 480).
 - On success, set `videos.thumbnail_ok = 1`.
 
 ### Serving

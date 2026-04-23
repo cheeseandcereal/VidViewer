@@ -16,15 +16,15 @@ player      = "mpv"
 player_args = ["--force-window=yes"]
 
 # Thumbnails
-thumbnail_width = 320
+thumbnail_width = 480
 
 # Previews (hover-scrub tile sheets)
 preview_min_interval = 2       # minimum seconds between previews
 preview_target_count = 100     # max previews per video
 
 # Workers
-worker_concurrency  = 10       # probe + thumbnail
-preview_concurrency = 8        # preview
+worker_concurrency  = 5        # probe + thumbnail
+preview_concurrency = 3        # preview
 
 # Scanner
 scan_on_startup = true
