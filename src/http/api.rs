@@ -167,9 +167,6 @@ pub async fn scan_status(State(state): State<AppState>) -> Response {
         }
     };
 
-    let jobs_counts = crate::jobs::counts(&state.pool).await.unwrap_or_default();
-    let busy = phase == "walking" || jobs_counts.any_incomplete();
-
     Json(serde_json::json!({
         "phase": phase,
         "files_seen": files_seen,
@@ -177,10 +174,22 @@ pub async fn scan_status(State(state): State<AppState>) -> Response {
         "changed_videos": changed_videos,
         "missing_videos": missing_videos,
         "error": error,
-        "jobs": jobs_counts,
-        "busy": busy,
     }))
     .into_response()
+}
+
+/// Per-directory job status. Used by the Settings page to show each directory's
+/// current activity inline, without any all-time global counters.
+pub async fn directory_job_status(State(state): State<AppState>) -> Response {
+    match crate::jobs::counts_by_directory(&state.pool).await {
+        Ok(map) => {
+            // Re-key by string so JSON serializes cleanly regardless of JSON number limits.
+            let keyed: std::collections::HashMap<String, _> =
+                map.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+            Json(keyed).into_response()
+        }
+        Err(err) => internal(err),
+    }
 }
 
 // ---------- Collections ----------

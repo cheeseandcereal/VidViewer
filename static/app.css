@@ -487,3 +487,21 @@ table.dirs th {
     font-variant-numeric: tabular-nums;
 }
 .job-counts .failed { color: var(--danger); }
+
+.activity-idle {
+    font-style: italic;
+}
+.activity-cell {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+}
+.activity-cell .failed {
+    color: var(--danger);
+}
+.activity-cell .progress-bar {
+    height: 3px;
+    max-width: 180px;
+}

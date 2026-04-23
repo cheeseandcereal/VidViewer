@@ -1,9 +1,9 @@
 // Settings page: directory management + directory picker modal + live status polling.
 //
 // No framework — only fetch + small DOM helpers. Data comes from /api/directories,
-// /api/fs/list, and /api/scan/status. The page never reloads itself; all updates
-// mutate the DOM in place so the user's scroll position, modal state, etc. are
-// preserved while background work progresses.
+// /api/fs/list, /api/directories/jobs, and /api/scan/status. The page never reloads
+// itself; all updates mutate the DOM in place so the user's scroll position and
+// modal state are preserved while background work progresses.
 
 (() => {
     const $ = (sel, root = document) => root.querySelector(sel);
@@ -78,11 +78,9 @@
             setPickerStatus(`Error: ${err.error || 'unknown'}${err.message ? ' — ' + err.message : ''}`);
             return;
         }
-        // Server auto-starts a scan for the new directory. We just close the modal
-        // and let the polling loop pick up the new row and activity.
         closePicker();
         refreshDirectories();
-        scheduleNextPoll(0); // immediate tick
+        scheduleNextPoll(0);
     }
 
     if (addBtn) addBtn.addEventListener('click', openPicker);
@@ -137,7 +135,6 @@
                 body: JSON.stringify({ label: next }),
             });
             if (!resp.ok) { alert('Rename failed'); return; }
-            // Optimistic in-place update; poll will re-confirm.
             if (labelEl) labelEl.textContent = next;
         }
     });
@@ -178,7 +175,6 @@
             existingRows.set(tr.dataset.dirId, tr);
         }
 
-        // Upsert rows in server order.
         const seen = new Set();
         for (const d of active) {
             const key = String(d.id);
@@ -191,7 +187,6 @@
                 updateRow(row, d);
             }
         }
-        // Remove rows that no longer apply.
         for (const [key, tr] of existingRows) {
             if (!seen.has(key)) tr.remove();
         }
@@ -220,9 +215,12 @@
         countTd.dataset.field = 'video_count';
         countTd.textContent = d.video_count;
 
-        const statusTd = document.createElement('td');
-        statusTd.dataset.field = 'status';
-        statusTd.appendChild(badgeFor(d));
+        const activityTd = document.createElement('td');
+        activityTd.dataset.field = 'activity';
+        const idle = document.createElement('span');
+        idle.className = 'activity-idle muted';
+        idle.textContent = 'idle';
+        activityTd.appendChild(idle);
 
         const actionsTd = document.createElement('td');
         actionsTd.dataset.field = 'actions';
@@ -238,7 +236,7 @@
             actionsTd.append(rescan, ' ', remove);
         }
 
-        tr.append(lblTd, pathTd, countTd, statusTd, actionsTd);
+        tr.append(lblTd, pathTd, countTd, activityTd, actionsTd);
         return tr;
     }
 
@@ -251,25 +249,61 @@
         if (countTd && countTd.textContent !== String(d.video_count)) {
             countTd.textContent = d.video_count;
         }
-        const statusTd = row.querySelector('[data-field="status"]');
-        if (statusTd) {
-            statusTd.innerHTML = '';
-            statusTd.appendChild(badgeFor(d));
+    }
+
+    function renderDirectoryActivity(jobsByDir) {
+        const rows = document.querySelectorAll('tr[data-dir-id]');
+        for (const row of rows) {
+            const id = row.dataset.dirId;
+            const cell = row.querySelector('[data-field="activity"]');
+            if (!cell) continue;
+            const s = jobsByDir[id];
+            cell.innerHTML = '';
+            if (!s || (s.probe_incomplete + s.thumbnail_incomplete + s.preview_incomplete === 0 && !s.failed)) {
+                const span = document.createElement('span');
+                span.className = 'activity-idle muted';
+                span.textContent = 'idle';
+                cell.appendChild(span);
+                continue;
+            }
+            const pieces = [];
+            if (s.probe_incomplete) pieces.push(`probing ${s.probe_incomplete}`);
+            if (s.thumbnail_incomplete) {
+                const done = Math.max(0, s.video_total - s.thumbnail_pending_videos);
+                pieces.push(`thumbs ${done}/${s.video_total}`);
+            }
+            if (s.preview_incomplete) {
+                // preview denominator = videos with a usable duration
+                const denom = Math.max(s.preview_pending_videos, 0) + Math.max(s.video_total - s.preview_pending_videos, 0);
+                const done = Math.max(0, denom - s.preview_pending_videos);
+                pieces.push(`previews ${done}/${denom}`);
+            }
+            if (s.failed) pieces.push(`<span class="failed">${s.failed} failed</span>`);
+
+            const wrap = document.createElement('div');
+            wrap.className = 'activity-cell';
+            wrap.innerHTML = pieces.join(' · ');
+
+            // Small progress bar: fraction of videos that have both thumb + preview ready.
+            if (s.video_total > 0) {
+                const notReady = Math.max(s.thumbnail_pending_videos, s.preview_pending_videos);
+                const ready = Math.max(0, s.video_total - notReady);
+                const pct = (ready / s.video_total) * 100;
+                const bar = document.createElement('div');
+                bar.className = 'progress-bar';
+                const fill = document.createElement('div');
+                fill.className = 'progress-fill';
+                fill.style.width = pct.toFixed(1) + '%';
+                bar.appendChild(fill);
+                wrap.appendChild(bar);
+            }
+            cell.appendChild(wrap);
         }
     }
 
-    function badgeFor(d) {
-        const span = document.createElement('span');
-        span.className = 'badge ' + (d.removed ? 'danger' : 'ok');
-        span.textContent = d.removed ? 'removed' : 'active';
-        return span;
-    }
-
-    // --- Scan + job status polling ---
+    // --- Scan + per-directory job status polling ---
 
     const summaryEl = $('#scan-summary');
-    const activityCard = $('#activity-card');
-    const scanDetail = $('#scan-detail');
 
     let pollHandle = null;
     let pollInterval = 1500;
@@ -280,92 +314,49 @@
     }
 
     async function poll() {
-        let s;
+        let scan = {};
+        let jobsByDir = {};
         try {
-            const resp = await fetch('/api/scan/status');
-            if (!resp.ok) throw new Error('status fetch failed');
-            s = await resp.json();
+            const [s, j] = await Promise.all([
+                fetch('/api/scan/status').then(r => r.ok ? r.json() : {}),
+                fetch('/api/directories/jobs').then(r => r.ok ? r.json() : {}),
+            ]);
+            scan = s || {};
+            jobsByDir = j || {};
         } catch {
             scheduleNextPoll(pollInterval);
             return;
         }
 
-        renderStatus(s);
         await refreshDirectories();
+        renderDirectoryActivity(jobsByDir);
+        renderScanSummary(scan, jobsByDir);
 
-        // Poll briskly while anything is happening; slower when idle.
-        pollInterval = s.busy ? 1500 : 5000;
+        const anyBusy = Object.values(jobsByDir).some(
+            v => (v.probe_incomplete + v.thumbnail_incomplete + v.preview_incomplete) > 0
+        );
+        const scanning = scan.phase === 'walking';
+        pollInterval = (anyBusy || scanning) ? 1500 : 5000;
         scheduleNextPoll(pollInterval);
     }
 
-    function renderStatus(s) {
-        const jobs = s.jobs || {};
-        const incomplete =
-            countIncomplete(jobs.probe) +
-            countIncomplete(jobs.thumbnail) +
-            countIncomplete(jobs.preview);
-
-        let summary;
-        if (s.phase === 'walking') {
-            summary = `Scanning… files seen ${s.files_seen}, new ${s.new_videos}, changed ${s.changed_videos}, missing ${s.missing_videos}`;
-        } else if (s.phase === 'failed') {
-            summary = `Scan failed: ${s.error || 'unknown error'}`;
-        } else if (incomplete > 0) {
-            summary = `Processing ${incomplete} background job${incomplete === 1 ? '' : 's'}`;
-        } else if (s.phase === 'done') {
-            summary = `Scan complete. new ${s.new_videos}, changed ${s.changed_videos}, missing ${s.missing_videos}. All background jobs done.`;
+    function renderScanSummary(scan, jobsByDir) {
+        if (!summaryEl) return;
+        const scanning = scan.phase === 'walking';
+        const anyBusy = Object.values(jobsByDir).some(
+            v => (v.probe_incomplete + v.thumbnail_incomplete + v.preview_incomplete) > 0
+        );
+        if (scan.phase === 'failed') {
+            summaryEl.textContent = `Scan failed: ${scan.error || 'unknown error'}`;
+        } else if (scanning) {
+            summaryEl.textContent =
+                `Scanning… files seen ${scan.files_seen || 0}, new ${scan.new_videos || 0}, changed ${scan.changed_videos || 0}, missing ${scan.missing_videos || 0}`;
+        } else if (anyBusy) {
+            summaryEl.textContent = 'Processing per-directory jobs';
         } else {
-            summary = 'Idle';
-        }
-        if (summaryEl) summaryEl.textContent = summary;
-
-        const show = s.busy || s.phase === 'walking' || s.phase === 'failed' || incomplete > 0;
-        if (activityCard) activityCard.hidden = !show;
-
-        if (scanDetail) {
-            if (s.phase === 'walking' || s.phase === 'failed') {
-                scanDetail.hidden = false;
-                if (s.phase === 'walking') {
-                    scanDetail.textContent = `Scan: ${s.files_seen} files seen · ${s.new_videos} new · ${s.changed_videos} changed · ${s.missing_videos} missing`;
-                } else {
-                    scanDetail.textContent = `Scan failed: ${s.error || 'unknown error'}`;
-                }
-            } else {
-                scanDetail.hidden = true;
-            }
-        }
-
-        renderJobBars(jobs);
-    }
-
-    function countIncomplete(k) {
-        if (!k) return 0;
-        return (k.pending || 0) + (k.running || 0);
-    }
-
-    function renderJobBars(jobs) {
-        for (const kind of ['probe', 'thumbnail', 'preview']) {
-            const el = document.querySelector(`.job-stat[data-kind="${kind}"]`);
-            if (!el) continue;
-            const k = jobs[kind] || { pending: 0, running: 0, done: 0, failed: 0 };
-            const total = (k.pending || 0) + (k.running || 0) + (k.done || 0) + (k.failed || 0);
-            const finished = (k.done || 0) + (k.failed || 0);
-            const pct = total > 0 ? (finished / total) * 100 : 0;
-            const fill = el.querySelector('.progress-fill');
-            if (fill) fill.style.width = pct.toFixed(1) + '%';
-            const counts = el.querySelector('.job-counts');
-            if (counts) {
-                const pieces = [
-                    `${finished}/${total}`,
-                    k.running ? `${k.running} running` : null,
-                    k.pending ? `${k.pending} queued` : null,
-                    k.failed ? `<span class="failed">${k.failed} failed</span>` : null,
-                ].filter(Boolean);
-                counts.innerHTML = pieces.join(' · ');
-            }
+            summaryEl.textContent = 'Idle';
         }
     }
 
-    // Kick things off.
     scheduleNextPoll(0);
 })();

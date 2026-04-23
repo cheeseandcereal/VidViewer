@@ -142,6 +142,10 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/fs/list", axum::routing::get(api::fs_list))
         .route("/api/scan", axum::routing::post(api::start_scan))
         .route("/api/scan/status", axum::routing::get(api::scan_status))
+        .route(
+            "/api/directories/jobs",
+            axum::routing::get(api::directory_job_status),
+        )
         .route("/debug", axum::routing::get(debug::debug_dump))
         .nest_service("/static", static_dir)
         .nest_service("/thumbs", thumbs_dir)

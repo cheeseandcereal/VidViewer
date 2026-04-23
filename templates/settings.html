@@ -17,7 +17,7 @@
 
   <table class="dirs" id="dirs-table" {% if directories.is_empty() %}hidden{% endif %}>
     <thead>
-      <tr><th>Label</th><th>Path</th><th>Videos</th><th>Status</th><th></th></tr>
+      <tr><th>Label</th><th>Path</th><th>Videos</th><th>Activity</th><th></th></tr>
     </thead>
     <tbody id="dirs-body">
     {% for d in directories %}
@@ -28,12 +28,8 @@
         </td>
         <td class="mono" data-field="path">{{ d.path }}</td>
         <td data-field="video_count">{{ d.video_count }}</td>
-        <td data-field="status">
-          {% if d.removed %}
-            <span class="badge danger">removed</span>
-          {% else %}
-            <span class="badge ok">active</span>
-          {% endif %}
+        <td data-field="activity">
+          <span class="activity-idle muted">idle</span>
         </td>
         <td data-field="actions">
           {% if !d.removed %}
@@ -49,28 +45,6 @@
   <div class="row" style="margin-top: var(--space-3);">
     <button type="button" class="primary" id="btn-rescan-all">Rescan all</button>
     <span class="muted" id="scan-summary">Idle</span>
-  </div>
-</section>
-
-<section class="card" id="activity-card" hidden>
-  <h2>Activity</h2>
-  <div id="scan-detail" class="muted" hidden></div>
-  <div class="jobs-grid">
-    <div class="job-stat" data-kind="probe">
-      <div class="job-label">Probe (metadata)</div>
-      <div class="progress-bar"><div class="progress-fill"></div></div>
-      <div class="job-counts muted small"></div>
-    </div>
-    <div class="job-stat" data-kind="thumbnail">
-      <div class="job-label">Thumbnails</div>
-      <div class="progress-bar"><div class="progress-fill"></div></div>
-      <div class="job-counts muted small"></div>
-    </div>
-    <div class="job-stat" data-kind="preview">
-      <div class="job-label">Hover-scrub previews</div>
-      <div class="progress-bar"><div class="progress-fill"></div></div>
-      <div class="job-counts muted small"></div>
-    </div>
   </div>
 </section>
 
