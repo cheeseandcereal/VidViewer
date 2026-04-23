@@ -21,6 +21,21 @@ Ideas out of MVP scope. Add to this file whenever a useful idea comes up during 
 - **Automated `vidviewer restore-backup`** subcommand.
 - **Detach** option on directory remove — keep the `directories` row, mark everything missing,
   but don't cascade on re-add.
+- **mpv hover-thumbnail integration** — make the existing sprite sheet + WebVTT
+  show up when hovering the mpv seek bar, so in-mpv scrubbing has the same
+  preview affordance as the browser grid. Requires shipping a small bundled
+  Lua script (passed via `--script=...`/`--script-opts=...` at launch, no
+  user install step), plus a new worker job that splits the existing sprite
+  sheet into per-tile raw BGRA files (mpv's `overlay-add` doesn't take JPEG).
+  Script would speak both thumbfast's IPC protocol (covers uosc / ModernX /
+  other modern OSC replacements on mpv ≤ 0.41) and the stock-OSC Preview
+  API landing in mpv 0.42+. Cost: ~150 lines of Lua, ~3 MB of BGRA per
+  video on disk, a new `mpv_preview_tiles` job kind, and touching
+  `src/player/`, `src/jobs/`, `migrations/`, and `docs/design/{03,06,08}`.
+  Users on vanilla stock OSC (mpv ≤ 0.41 without uosc) would still see
+  nothing unless we also bundle po5's `vanilla-osc` fork. Deferred because
+  the browser grid already has working hover-scrub and most mpv users who
+  care about in-mpv thumbnails already run uosc + thumbfast.
 
 ## Explicitly out of scope
 
