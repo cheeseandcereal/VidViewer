@@ -1,7 +1,5 @@
 # 12 — Configuration
 
-Last updated: 2026-04-22
-
 Config lives at `~/.config/vidviewer/config.toml`. On first run the app writes a default
 file if none exists. Paths in keys that accept `~` are expanded to `$HOME`.
 

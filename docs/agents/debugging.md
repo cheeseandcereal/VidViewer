@@ -1,7 +1,5 @@
 # Agent playbook — Debugging
 
-Last updated: 2026-04-22
-
 ## Quick checks
 
 ```sh

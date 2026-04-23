@@ -1,7 +1,5 @@
 # 11 — UTF-8 and i18n
 
-Last updated: 2026-04-22
-
 VidViewer is designed to handle full UTF-8 including CJK (Chinese, Japanese, Korean) text
 correctly throughout. Linux-only scope simplifies this considerably compared to cross-platform:
 macOS NFD normalization and Windows UTF-16 are non-issues.

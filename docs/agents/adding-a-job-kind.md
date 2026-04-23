@@ -1,7 +1,5 @@
 # Agent playbook — Adding a job kind
 
-Last updated: 2026-04-22
-
 Job kinds are the discrete background work units tracked in the `jobs` table. To add one:
 
 1. **Pick a name.** Must be a lowercase ASCII string, e.g. `waveform`. Add it to the allowed

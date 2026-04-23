@@ -1,7 +1,5 @@
 # 14 — Migrations and backups
 
-Last updated: 2026-04-22
-
 Schema migrations live in `migrations/NNNN_description.sql` at the repo root and are applied
 via `sqlx::migrate!` at startup.
 

@@ -1,7 +1,5 @@
 # 01 — Overview
 
-Last updated: 2026-04-22
-
 ## Purpose
 
 VidViewer is a local-first, self-hosted web app for browsing a personal video library on Linux.

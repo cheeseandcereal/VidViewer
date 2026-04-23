@@ -1,7 +1,5 @@
 # Agent playbook — Changing the schema
 
-Last updated: 2026-04-22
-
 1. **Add a new migration.** Never edit committed ones.
    - Filename: `migrations/NNNN_<snake_case_description>.sql`, where `NNNN` is the next
      sequential four-digit number.

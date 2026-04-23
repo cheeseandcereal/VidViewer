@@ -1,7 +1,5 @@
 # 08 — mpv integration
 
-Last updated: 2026-04-22
-
 Playback happens in an external `mpv` process. The server spawns it, connects to its JSON IPC
 socket, observes `time-pos`, and persists progress to `watch_history`.
 

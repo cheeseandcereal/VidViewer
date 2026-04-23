@@ -1,7 +1,5 @@
 # 04 — Scanner
 
-Last updated: 2026-04-22
-
 The scanner keeps the DB aligned with configured directories on disk. It is deliberately
 cheap on no-op runs so it can run at startup as well as on demand.
 

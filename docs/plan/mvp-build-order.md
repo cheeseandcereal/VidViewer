@@ -1,7 +1,5 @@
 # MVP build order
 
-Last updated: 2026-04-23
-
 All MVP steps are complete.
 
 - [x] **Step 0** — Documentation, tooling, conventions

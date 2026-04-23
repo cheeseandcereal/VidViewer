@@ -1,7 +1,5 @@
 # 06 — Thumbnails and previews
 
-Last updated: 2026-04-22
-
 Two derived asset kinds per video:
 
 - **Thumbnail**: single poster JPEG used in grid cards and the detail page.

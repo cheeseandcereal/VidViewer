@@ -1,7 +1,5 @@
 # 05 — Jobs and workers
 
-Last updated: 2026-04-22
-
 Background work (metadata probing, thumbnail generation, preview sheets) runs asynchronously
 in two worker lanes backed by the `jobs` table.
 

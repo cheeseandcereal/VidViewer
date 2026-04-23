@@ -1,7 +1,5 @@
 # Agent playbook — Adding a page
 
-Last updated: 2026-04-22
-
 To add a new HTML page:
 
 1. **Template.** Create `templates/<name>.html` extending `templates/base.html`. Keep it
