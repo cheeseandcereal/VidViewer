@@ -78,4 +78,5 @@ tests/          Integration tests
 
 ## License
 
-MIT OR Apache-2.0.
+This is free and unencumbered software released into the public domain under
+[The Unlicense](./LICENSE).
