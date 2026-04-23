@@ -5,7 +5,10 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 
-use crate::ids::{CollectionId, DirectoryId, VideoId};
+use crate::{
+    db::row::{bool_from_i64, datetime_from_rfc3339},
+    ids::{CollectionId, DirectoryId, VideoId},
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Video {
@@ -86,12 +89,10 @@ pub async fn get_detail(pool: &SqlitePool, id: &VideoId) -> Result<Option<VideoD
     .await
     .context("history for video")?;
     let history = if let Some(r) = history_row {
-        let last_watched_at: String = r.get("last_watched_at");
         Some(WatchHistoryRow {
-            last_watched_at: chrono::DateTime::parse_from_rfc3339(&last_watched_at)?
-                .with_timezone(&Utc),
+            last_watched_at: datetime_from_rfc3339(&r, "last_watched_at")?,
             position_secs: r.get::<f64, _>("position_secs"),
-            completed: r.get::<i64, _>("completed") != 0,
+            completed: bool_from_i64(&r, "completed"),
             watch_count: r.get("watch_count"),
         })
     } else {
@@ -142,13 +143,6 @@ pub fn row_to_video(row: &sqlx::sqlite::SqliteRow) -> Result<Video> {
     let width: Option<i64> = row.get("width");
     let height: Option<i64> = row.get("height");
     let codec: Option<String> = row.get("codec");
-    let thumbnail_ok: i64 = row.get("thumbnail_ok");
-    let preview_ok: i64 = row.get("preview_ok");
-    let missing: i64 = row.get("missing");
-    let created_at: String = row.get("created_at");
-    let updated_at: String = row.get("updated_at");
-    let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc);
-    let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc);
     Ok(Video {
         id: VideoId(id),
         directory_id: DirectoryId(directory_id),
@@ -160,10 +154,10 @@ pub fn row_to_video(row: &sqlx::sqlite::SqliteRow) -> Result<Video> {
         width,
         height,
         codec,
-        thumbnail_ok: thumbnail_ok != 0,
-        preview_ok: preview_ok != 0,
-        missing: missing != 0,
-        created_at,
-        updated_at,
+        thumbnail_ok: bool_from_i64(row, "thumbnail_ok"),
+        preview_ok: bool_from_i64(row, "preview_ok"),
+        missing: bool_from_i64(row, "missing"),
+        created_at: datetime_from_rfc3339(row, "created_at")?,
+        updated_at: datetime_from_rfc3339(row, "updated_at")?,
     })
 }

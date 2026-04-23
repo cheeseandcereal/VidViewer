@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::{
     clock::ClockRef,
+    db::row::{bool_from_i64, datetime_from_rfc3339},
     ids::{CollectionId, DirectoryId, VideoId},
 };
 
@@ -154,18 +155,15 @@ fn row_to_collection(row: &sqlx::sqlite::SqliteRow) -> Result<Collection> {
     let name: String = row.get("name");
     let kind: String = row.get("kind");
     let directory_id: Option<i64> = row.get("directory_id");
-    let hidden: i64 = row.get("hidden");
-    let created_at: String = row.get("created_at");
-    let updated_at: String = row.get("updated_at");
     let video_count: i64 = row.get("video_count");
     Ok(Collection {
         id: CollectionId(id),
         name,
         kind: Kind::from_db(&kind).unwrap_or(Kind::Custom),
         directory_id: directory_id.map(DirectoryId),
-        hidden: hidden != 0,
-        created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&Utc),
-        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc),
+        hidden: bool_from_i64(row, "hidden"),
+        created_at: datetime_from_rfc3339(row, "created_at")?,
+        updated_at: datetime_from_rfc3339(row, "updated_at")?,
         video_count,
     })
 }
@@ -347,15 +345,14 @@ pub async fn videos_in(pool: &SqlitePool, id: CollectionId) -> Result<Vec<VideoC
     .context("videos_in")?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        let updated_at: String = r.get("updated_at");
-        let dt = chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc);
+        let dt = datetime_from_rfc3339(&r, "updated_at")?;
         out.push(VideoCard {
             id: VideoId(r.get("id")),
             filename: r.get("filename"),
             duration_secs: r.get("duration_secs"),
-            thumbnail_ok: r.get::<i64, _>("thumbnail_ok") != 0,
-            preview_ok: r.get::<i64, _>("preview_ok") != 0,
-            missing: r.get::<i64, _>("missing") != 0,
+            thumbnail_ok: bool_from_i64(&r, "thumbnail_ok"),
+            preview_ok: bool_from_i64(&r, "preview_ok"),
+            missing: bool_from_i64(&r, "missing"),
             updated_at_epoch: dt.timestamp(),
         });
     }

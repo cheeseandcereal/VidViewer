@@ -5,7 +5,11 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 
-use crate::{clock::ClockRef, ids::VideoId};
+use crate::{
+    clock::ClockRef,
+    db::row::{bool_from_i64, datetime_from_rfc3339},
+    ids::VideoId,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HistoryEntry {
@@ -129,18 +133,16 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HistoryEntry>> {
     .context("listing history")?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        let lw: String = r.get("last_watched_at");
-        let ua: String = r.get("updated_at");
         out.push(HistoryEntry {
             video_id: VideoId(r.get("video_id")),
             filename: r.get("filename"),
             duration_secs: r.get("duration_secs"),
-            thumbnail_ok: r.get::<i64, _>("thumbnail_ok") != 0,
-            last_watched_at: chrono::DateTime::parse_from_rfc3339(&lw)?.with_timezone(&Utc),
+            thumbnail_ok: bool_from_i64(&r, "thumbnail_ok"),
+            last_watched_at: datetime_from_rfc3339(&r, "last_watched_at")?,
             position_secs: r.get("position_secs"),
-            completed: r.get::<i64, _>("completed") != 0,
+            completed: bool_from_i64(&r, "completed"),
             watch_count: r.get("watch_count"),
-            updated_at_epoch: chrono::DateTime::parse_from_rfc3339(&ua)?.timestamp(),
+            updated_at_epoch: datetime_from_rfc3339(&r, "updated_at")?.timestamp(),
         });
     }
     Ok(out)

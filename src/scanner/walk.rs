@@ -16,6 +16,7 @@ use walkdir::WalkDir;
 
 use crate::{
     clock::ClockRef,
+    db::row::bool_from_i64,
     directories,
     ids::VideoId,
     scanner::{mutations, verify, CachePaths, ScanProgress, ScanReport, VIDEO_EXTENSIONS},
@@ -65,9 +66,6 @@ pub(super) async fn scan_one(
         let rel: String = row.get("relative_path");
         let size: i64 = row.get("size_bytes");
         let mtime: i64 = row.get("mtime_unix");
-        let missing: i64 = row.get("missing");
-        let thumbnail_ok: i64 = row.get("thumbnail_ok");
-        let preview_ok: i64 = row.get("preview_ok");
         let duration_secs: Option<f64> = row.get("duration_secs");
         known.insert(
             rel,
@@ -75,9 +73,9 @@ pub(super) async fn scan_one(
                 id: VideoId(id),
                 size_bytes: size,
                 mtime_unix: mtime,
-                missing: missing != 0,
-                thumbnail_ok: thumbnail_ok != 0,
-                preview_ok: preview_ok != 0,
+                missing: bool_from_i64(&row, "missing"),
+                thumbnail_ok: bool_from_i64(&row, "thumbnail_ok"),
+                preview_ok: bool_from_i64(&row, "preview_ok"),
                 duration_secs,
             },
         );

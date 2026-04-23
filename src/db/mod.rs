@@ -18,6 +18,8 @@ use sqlx::{
 
 use crate::config::Config;
 
+pub mod row;
+
 /// Compile-in the migration files at `migrations/` for runtime application.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 

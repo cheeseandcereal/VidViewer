@@ -16,7 +16,10 @@ use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 use thiserror::Error;
 
-use crate::ids::{CollectionId, DirectoryId};
+use crate::{
+    db::row::{bool_from_i64, datetime_from_rfc3339},
+    ids::{CollectionId, DirectoryId},
+};
 
 mod commands;
 #[cfg(test)]
@@ -153,19 +156,15 @@ fn row_to_directory(row: &sqlx::sqlite::SqliteRow) -> Result<Directory> {
     let id: i64 = row.get("id");
     let path: String = row.get("path");
     let label: String = row.get("label");
-    let added_at: String = row.get("added_at");
-    let removed: i64 = row.get("removed");
     let video_count: i64 = row.get("video_count");
     let collection_id: Option<i64> = row.try_get("collection_id").ok();
-    let added_at = chrono::DateTime::parse_from_rfc3339(&added_at)
-        .with_context(|| format!("parsing added_at for directory {id}"))?
-        .with_timezone(&Utc);
+    let added_at = datetime_from_rfc3339(row, "added_at")?;
     Ok(Directory {
         id: DirectoryId(id),
         path,
         label,
         added_at,
-        removed: removed != 0,
+        removed: bool_from_i64(row, "removed"),
         video_count,
         collection_id: CollectionId(collection_id.unwrap_or(0)),
     })
