@@ -4,6 +4,10 @@
 //! functionality is exposed here so integration tests can exercise it directly.
 
 pub mod cli;
+pub mod clock;
 pub mod config;
+pub mod db;
 pub mod http;
+pub mod ids;
 pub mod logging;
+pub mod state;

@@ -79,7 +79,12 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
     let cfg = config::load_or_create(&config_path)?;
 
     match cli.command {
-        None => crate::http::serve(cfg).await,
+        None => {
+            let db_path = crate::config::database_path();
+            let pool = crate::db::init(&cfg, &db_path).await?;
+            let state = crate::state::AppState::new(cfg, pool);
+            crate::http::serve(state).await
+        }
         Some(Command::Doctor) => doctor(&cfg).await,
         Some(Command::Scan { dry_run, dir_id }) => scan(&cfg, dry_run, dir_id).await,
     }
@@ -113,9 +118,16 @@ async fn doctor(cfg: &crate::config::Config) -> Result<()> {
         }
     }
 
-    tracing::info!(path = %config::database_path().display(), "database path");
+    let db_path = config::database_path();
+    tracing::info!(path = %db_path.display(), "database path");
     tracing::info!(path = %config::thumb_cache_dir().display(), "thumb cache");
     tracing::info!(path = %config::preview_cache_dir().display(), "preview cache");
+
+    // Try opening the DB (and migrating if needed) to surface startup issues.
+    match crate::db::init(cfg, &db_path).await {
+        Ok(_) => tracing::info!("database ok"),
+        Err(err) => tracing::error!(error = format!("{err:#}"), "database init failed"),
+    }
 
     Ok(())
 }

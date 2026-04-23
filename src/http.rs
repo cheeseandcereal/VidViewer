@@ -9,13 +9,14 @@ use anyhow::{Context, Result};
 use axum::{response::IntoResponse, routing::get, Router};
 use tokio::signal;
 
-use crate::config::Config;
+use crate::state::AppState;
 
-pub async fn serve(cfg: Config) -> Result<()> {
-    let app = router();
+pub async fn serve(state: AppState) -> Result<()> {
+    let port = state.config.port;
+    let app = router(state);
 
     // Localhost only — this app is not meant for LAN / public exposure.
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), cfg.port);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding to {addr}"))?;
@@ -28,10 +29,11 @@ pub async fn serve(cfg: Config) -> Result<()> {
     Ok(())
 }
 
-fn router() -> Router {
+fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/", get(root))
+        .with_state(state)
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -58,7 +60,6 @@ async fn shutdown_signal() {
         }
     };
 
-    #[cfg(unix)]
     let terminate = async {
         match signal::unix::signal(signal::unix::SignalKind::terminate()) {
             Ok(mut s) => {
@@ -70,9 +71,6 @@ async fn shutdown_signal() {
             }
         }
     };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
 
     tokio::select! {
         _ = ctrl_c => {},
@@ -89,9 +87,22 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::util::ServiceExt;
 
+    async fn test_state() -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            backup_dir: tmp.path().join("backups"),
+            ..crate::config::Config::default()
+        };
+        let db_path = tmp.path().join("vidviewer.db");
+        let pool = crate::db::init(&cfg, &db_path).await.unwrap();
+        // Leak the tempdir so the DB file lives for the duration of the test.
+        std::mem::forget(tmp);
+        AppState::new(cfg, pool)
+    }
+
     #[tokio::test]
     async fn healthz_returns_ok() {
-        let app = router();
+        let app = router(test_state().await);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -106,7 +117,7 @@ mod tests {
 
     #[tokio::test]
     async fn root_serves_utf8_html() {
-        let app = router();
+        let app = router(test_state().await);
         let resp = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
