@@ -143,14 +143,16 @@ pub async fn set_label(
 /// Soft-remove the directory:
 ///   * mark `directories.removed = 1`
 ///   * mark the directory collection `hidden = 1`
-///   * delete `collection_videos` rows for that collection (so on re-add, scanner repopulates)
 ///   * mark all videos in this directory `missing = 1`
 ///   * cancel any pending background jobs for videos in this directory
 ///
-/// Watch history and custom collection memberships are preserved. Jobs already in the
-/// `running` state are allowed to finish naturally — the wasted work is bounded and
-/// cancelling mid-ffmpeg would require process tracking that isn't worth the complexity
-/// for this case.
+/// Watch history is preserved. Any `collection_directories` rows linking this
+/// directory to custom collections are preserved too — the `missing = 1` flag
+/// on its videos is enough to keep them out of listings, and the link will
+/// start contributing again the moment the directory is re-added. Jobs
+/// already in the `running` state are allowed to finish naturally — the
+/// wasted work is bounded and cancelling mid-ffmpeg would require process
+/// tracking that isn't worth the complexity for this case.
 pub async fn soft_remove(pool: &SqlitePool, clock: &ClockRef, id: DirectoryId) -> Result<()> {
     let now_s = clock.now().to_rfc3339();
     let mut tx = pool.begin().await.context("begin tx")?;
@@ -163,28 +165,17 @@ pub async fn soft_remove(pool: &SqlitePool, clock: &ClockRef, id: DirectoryId) -
     if affected == 0 {
         bail!("directory id {id} not found");
     }
-    // Find the directory's collection id.
-    let coll_id: Option<i64> =
-        sqlx::query("SELECT id FROM collections WHERE kind = 'directory' AND directory_id = ?")
-            .bind(id.raw())
-            .fetch_optional(&mut *tx)
-            .await
-            .context("fetching directory collection id")?
-            .map(|r| r.get(0));
-
-    if let Some(cid) = coll_id {
-        sqlx::query("DELETE FROM collection_videos WHERE collection_id = ?")
-            .bind(cid)
-            .execute(&mut *tx)
-            .await
-            .context("clearing directory collection memberships")?;
-        sqlx::query("UPDATE collections SET hidden = 1, updated_at = ? WHERE id = ?")
-            .bind(&now_s)
-            .bind(cid)
-            .execute(&mut *tx)
-            .await
-            .context("hiding directory collection")?;
-    }
+    // Hide the directory's collection. Membership is computed on read from
+    // videos.directory_id, so there's nothing to clear.
+    sqlx::query(
+        "UPDATE collections SET hidden = 1, updated_at = ? \
+         WHERE kind = 'directory' AND directory_id = ?",
+    )
+    .bind(&now_s)
+    .bind(id.raw())
+    .execute(&mut *tx)
+    .await
+    .context("hiding directory collection")?;
 
     sqlx::query("UPDATE videos SET missing = 1, updated_at = ? WHERE directory_id = ?")
         .bind(&now_s)
@@ -234,11 +225,11 @@ pub struct HardRemoveReport {
 ///     not abort the operation);
 ///   * `jobs` rows referencing videos in this directory are deleted;
 ///   * the `directories` row is deleted, which cascades via FK to `videos`,
-///     `collection_videos` (both directory and custom collection memberships),
-///     `watch_history`, and the directory's own `collections` row.
+///     `watch_history`, the directory's own `collections` row, and any
+///     `collection_directories` rows referencing this directory.
 ///
-/// Custom collections themselves remain, but lose their membership rows for these
-/// videos.
+/// Custom collections themselves remain, but lose any reference they had to this
+/// directory.
 pub async fn hard_remove(
     pool: &SqlitePool,
     _clock: &ClockRef,
