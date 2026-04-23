@@ -418,3 +418,51 @@ table.dirs th {
     color: var(--text);
     text-decoration: none;
 }
+
+.history-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+.history-item {
+    display: grid;
+    grid-template-columns: 160px 1fr auto;
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+}
+.history-item .thumb {
+    display: block;
+    width: 160px;
+    aspect-ratio: 16/9;
+    background: var(--surface-2);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+.history-item .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.history-item .filename {
+    font-weight: 500;
+    color: var(--text);
+    text-decoration: none;
+    display: block;
+    margin-bottom: var(--space-1);
+    word-break: break-word;
+}
+.history-item .filename:hover { text-decoration: underline; }
+.history-item .small { font-size: 12px; }
+.history-item .ok { color: var(--ok); }
+
+.progress-bar {
+    width: 100%;
+    max-width: 320px;
+    height: 4px;
+    background: var(--surface-2);
+    border-radius: 2px;
+    overflow: hidden;
+    margin: var(--space-1) 0;
+}
+.progress-fill {
+    height: 100%;
+    background: var(--accent);
+}

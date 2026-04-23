@@ -10,7 +10,9 @@ use serde::Deserialize;
 
 use crate::{
     collections::{self, Collection, CollectionSummary, VideoCard},
-    directories, ids,
+    directories,
+    history::{self, HistoryEntry},
+    ids,
     state::AppState,
     videos::{self, DetailCollection, Video, WatchHistoryRow},
 };
@@ -21,14 +23,35 @@ mod filters {
         let Some(secs) = d else {
             return Ok(String::new());
         };
+        Ok(format_hms(*secs))
+    }
+
+    /// Format a plain f64 number of seconds.
+    pub fn duration_secs(d: &f64) -> askama::Result<String> {
+        Ok(format_hms(*d))
+    }
+
+    /// Progress percentage given (position, duration).
+    pub fn progress_pct(position: &f64, duration: &Option<f64>) -> askama::Result<String> {
+        let Some(d) = duration else {
+            return Ok("0".to_string());
+        };
+        if *d <= 0.0 {
+            return Ok("0".to_string());
+        }
+        let pct = (position / d * 100.0).clamp(0.0, 100.0);
+        Ok(format!("{pct:.1}"))
+    }
+
+    fn format_hms(secs: f64) -> String {
         let total = secs.max(0.0).round() as u64;
         let h = total / 3600;
         let m = (total % 3600) / 60;
         let s = total % 60;
         if h > 0 {
-            Ok(format!("{h}:{m:02}:{s:02}"))
+            format!("{h}:{m:02}:{s:02}")
         } else {
-            Ok(format!("{m}:{s:02}"))
+            format!("{m}:{s:02}")
         }
     }
 }
@@ -90,6 +113,17 @@ struct SettingsTemplate {
     db_path: String,
     thumb_dir: String,
     preview_dir: String,
+}
+
+#[derive(Template)]
+#[template(path = "history.html")]
+struct HistoryTemplate {
+    entries: Vec<HistoryEntry>,
+}
+
+pub async fn history_page(State(state): State<AppState>) -> Response {
+    let entries = history::list(&state.pool).await.unwrap_or_default();
+    render(HistoryTemplate { entries })
 }
 
 #[derive(Debug, Deserialize)]

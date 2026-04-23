@@ -77,6 +77,7 @@ pub(crate) fn router(state: AppState) -> Router {
             axum::routing::get(pages::collection_page),
         )
         .route("/videos/:id", axum::routing::get(pages::video_detail_page))
+        .route("/history", axum::routing::get(pages::history_page))
         .route("/settings", axum::routing::get(pages::settings))
         .route(
             "/api/directories",

@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}History — VidViewer{% endblock %}
+
+{% block content %}
+<h1>Watch history</h1>
+
+{% if entries.is_empty() %}
+<section class="placeholder">
+  <h2>No watch history yet</h2>
+  <p class="muted">Launch a video and your progress will be recorded here.</p>
+</section>
+{% else %}
+<ul class="history-list">
+  {% for e in entries %}
+  <li class="history-item" data-video-id="{{ e.video_id }}">
+    <a class="thumb" href="/videos/{{ e.video_id }}">
+      {% if e.thumbnail_ok %}
+        <img src="/thumbs/{{ e.video_id }}.jpg?v={{ e.updated_at_epoch }}" alt="" loading="lazy">
+      {% else %}
+        <div class="thumb-placeholder"></div>
+      {% endif %}
+    </a>
+    <div class="history-meta">
+      <a class="filename" href="/videos/{{ e.video_id }}">{{ e.filename }}</a>
+      <div class="muted">
+        Last watched: {{ e.last_watched_at.format("%Y-%m-%d %H:%M UTC") }}
+        &middot; watched {{ e.watch_count }}×
+        {% if e.completed %}&middot; <span class="ok">completed</span>{% endif %}
+      </div>
+      {% if !e.completed && e.duration_secs.is_some() && e.duration_secs.unwrap() > 0.0 %}
+      <div class="progress-bar">
+        <div class="progress-fill"
+             style="width: {{ e.position_secs|progress_pct(e.duration_secs) }}%"></div>
+      </div>
+      <div class="muted small">
+        Resume at {{ e.position_secs|duration_secs }} / {{ e.duration_secs|duration }}
+      </div>
+      {% endif %}
+    </div>
+    <div class="history-actions">
+      <button type="button" class="danger btn-clear-one">Clear</button>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/history.js" defer></script>
+{% endblock %}
