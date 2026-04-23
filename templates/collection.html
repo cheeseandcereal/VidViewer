@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}{{ collection.name }} — VidViewer{% endblock %}
+
+{% block content %}
+<header class="collection-header">
+  <div>
+    <h1>{{ collection.name }}</h1>
+    <p class="muted">
+      {{ collection.video_count }} video{% if collection.video_count != 1 %}s{% endif %}
+      {% match collection.kind %}
+        {% when crate::collections::Kind::Directory %}
+          &middot; directory
+        {% when crate::collections::Kind::Custom %}
+          &middot; custom
+      {% endmatch %}
+    </p>
+  </div>
+  <div class="actions">
+    <button type="button" class="primary" id="btn-random" {% if videos.is_empty() %}disabled{% endif %}>🎲 Random</button>
+    {% match collection.kind %}
+      {% when crate::collections::Kind::Custom %}
+        <button type="button" id="btn-rename">Rename</button>
+        <button type="button" class="danger" id="btn-delete">Delete</button>
+      {% when crate::collections::Kind::Directory %}
+    {% endmatch %}
+  </div>
+</header>
+
+{% if videos.is_empty() %}
+<section class="placeholder">
+  <h2>No videos yet</h2>
+  <p class="muted">
+    {% match collection.kind %}
+      {% when crate::collections::Kind::Directory %}
+        The scanner hasn't found anything here yet. Check
+        <a href="/settings">Settings</a> to trigger a rescan.
+      {% when crate::collections::Kind::Custom %}
+        This collection is empty. Add videos from any video detail page.
+    {% endmatch %}
+  </p>
+</section>
+{% else %}
+<div class="video-grid" data-collection-id="{{ collection.id }}">
+  {% for v in videos %}
+    <a class="video-card{% if v.missing %} missing{% endif %}" href="/videos/{{ v.id }}?cid={{ collection.id }}">
+      <div class="video-thumb">
+        {% if v.thumbnail_ok %}
+          <img src="/thumbs/{{ v.id }}.jpg?v={{ v.updated_at_epoch }}" alt="" loading="lazy">
+        {% else %}
+          <div class="thumb-placeholder"></div>
+        {% endif %}
+        {% if v.duration_secs.is_some() %}
+          <span class="duration-badge">{{ v.duration_secs|duration }}</span>
+        {% endif %}
+        {% if v.missing %}
+          <span class="missing-badge">missing</span>
+        {% endif %}
+      </div>
+      <div class="video-filename">{{ v.filename }}</div>
+    </a>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/collection.js" defer></script>
+{% endblock %}

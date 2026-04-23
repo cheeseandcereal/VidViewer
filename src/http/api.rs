@@ -11,9 +11,10 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
+    collections::{self, MutationError},
     directories::{self, AddError},
     fs_browse,
-    ids::DirectoryId,
+    ids::{CollectionId, DirectoryId, VideoId},
     scanner,
     state::AppState,
     ui_state,
@@ -154,6 +155,129 @@ pub async fn scan_status(State(state): State<AppState>) -> Response {
         "error": error,
     }))
     .into_response()
+}
+
+// ---------- Collections ----------
+
+#[derive(Debug, Deserialize)]
+pub struct KindQuery {
+    pub kind: Option<String>,
+}
+
+pub async fn list_collections(
+    State(state): State<AppState>,
+    Query(q): Query<KindQuery>,
+) -> Response {
+    let kind = match q.kind.as_deref() {
+        Some("directory") => Some(collections::Kind::Directory),
+        Some("custom") => Some(collections::Kind::Custom),
+        _ => None,
+    };
+    match collections::list(&state.pool, kind).await {
+        Ok(v) => Json(v).into_response(),
+        Err(err) => internal(err),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateCollectionReq {
+    pub name: String,
+}
+
+pub async fn create_collection(
+    State(state): State<AppState>,
+    Json(req): Json<CreateCollectionReq>,
+) -> Response {
+    match collections::create_custom(&state.pool, &state.clock, &req.name).await {
+        Ok(c) => (StatusCode::CREATED, Json(c)).into_response(),
+        Err(err) => mutation_error_response(err),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenameCollectionReq {
+    pub name: String,
+}
+
+pub async fn rename_collection(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    Json(req): Json<RenameCollectionReq>,
+) -> Response {
+    match collections::rename(&state.pool, &state.clock, CollectionId(id), &req.name).await {
+        Ok(c) => Json(c).into_response(),
+        Err(err) => mutation_error_response(err),
+    }
+}
+
+pub async fn delete_collection(State(state): State<AppState>, AxPath(id): AxPath<i64>) -> Response {
+    match collections::delete_custom(&state.pool, CollectionId(id)).await {
+        Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
+        Err(err) => mutation_error_response(err),
+    }
+}
+
+pub async fn list_collection_videos(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+) -> Response {
+    match collections::videos_in(&state.pool, CollectionId(id)).await {
+        Ok(v) => Json(v).into_response(),
+        Err(err) => internal(err),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CollectionVideoReq {
+    pub video_id: String,
+}
+
+pub async fn add_video_to_collection(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    Json(req): Json<CollectionVideoReq>,
+) -> Response {
+    match collections::add_video(
+        &state.pool,
+        &state.clock,
+        CollectionId(id),
+        &VideoId(req.video_id),
+    )
+    .await
+    {
+        Ok(()) => (StatusCode::CREATED, ()).into_response(),
+        Err(err) => mutation_error_response(err),
+    }
+}
+
+pub async fn remove_video_from_collection(
+    State(state): State<AppState>,
+    AxPath((cid, vid)): AxPath<(i64, String)>,
+) -> Response {
+    match collections::remove_video(&state.pool, CollectionId(cid), &VideoId(vid)).await {
+        Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
+        Err(err) => mutation_error_response(err),
+    }
+}
+
+pub async fn random_from_collection(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+) -> Response {
+    match collections::random_video(&state.pool, CollectionId(id)).await {
+        Ok(Some(v)) => Json(serde_json::json!({ "video_id": v })).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "empty"})),
+        )
+            .into_response(),
+        Err(err) => internal(err),
+    }
+}
+
+fn mutation_error_response(err: MutationError) -> Response {
+    let status = err.status();
+    (status, Json(err)).into_response()
 }
 
 // ---------- helpers ----------

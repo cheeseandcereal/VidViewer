@@ -3,10 +3,41 @@
 {% block title %}VidViewer — Home{% endblock %}
 
 {% block content %}
+<h1>Library</h1>
+
+{% if directory_collections.is_empty() && custom_collections.is_empty() %}
 <section class="placeholder">
-  <h1>VidViewer</h1>
-  <p>Your library is empty. Add a directory from
-     <a href="/settings">Settings</a> to get started.</p>
-  <p class="muted">Build step 3 (UTF-8 hygiene) landed; real collection listing comes in step 7.</p>
+  <h2>Your library is empty</h2>
+  <p class="muted">
+    Add a directory from <a href="/settings">Settings</a> to get started.
+  </p>
 </section>
+{% endif %}
+
+{% if !directory_collections.is_empty() %}
+<section>
+  <h2 class="section-heading">Directories</h2>
+  <div class="collection-grid">
+    {% for c in directory_collections %}
+      {% include "_collection_card.html" %}
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section>
+  <h2 class="section-heading">My Collections</h2>
+  <div class="collection-grid">
+    {% for c in custom_collections %}
+      {% include "_collection_card.html" %}
+    {% endfor %}
+    <button type="button" class="collection-card add-card" id="btn-new-collection">
+      <div class="add-card-inner">+ New Collection</div>
+    </button>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/home.js" defer></script>
 {% endblock %}

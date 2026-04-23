@@ -46,6 +46,10 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", axum::routing::get(healthz))
         .route("/", axum::routing::get(pages::home))
+        .route(
+            "/collections/:id",
+            axum::routing::get(pages::collection_page),
+        )
         .route("/settings", axum::routing::get(pages::settings))
         .route(
             "/api/directories",
@@ -54,6 +58,26 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(
             "/api/directories/:id",
             axum::routing::patch(api::patch_directory).delete(api::delete_directory),
+        )
+        .route(
+            "/api/collections",
+            axum::routing::get(api::list_collections).post(api::create_collection),
+        )
+        .route(
+            "/api/collections/:id",
+            axum::routing::patch(api::rename_collection).delete(api::delete_collection),
+        )
+        .route(
+            "/api/collections/:id/videos",
+            axum::routing::get(api::list_collection_videos).post(api::add_video_to_collection),
+        )
+        .route(
+            "/api/collections/:cid/videos/:vid",
+            axum::routing::delete(api::remove_video_from_collection),
+        )
+        .route(
+            "/api/collections/:id/random",
+            axum::routing::get(api::random_from_collection),
         )
         .route("/api/fs/list", axum::routing::get(api::fs_list))
         .route("/api/scan", axum::routing::post(api::start_scan))

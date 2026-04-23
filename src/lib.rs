@@ -5,6 +5,7 @@
 
 pub mod cli;
 pub mod clock;
+pub mod collections;
 pub mod config;
 pub mod db;
 pub mod directories;

@@ -1,0 +1,14 @@
+<a class="collection-card" href="/collections/{{ c.coll.id }}">
+  <div class="mosaic">
+    {% for vid in c.preview_video_ids %}
+      <img src="/thumbs/{{ vid }}.jpg" alt="" loading="lazy">
+    {% endfor %}
+    {% if c.preview_video_ids.is_empty() %}
+      <div class="mosaic-empty"></div>
+    {% endif %}
+  </div>
+  <div class="collection-meta">
+    <div class="collection-name">{{ c.coll.name }}</div>
+    <div class="collection-count muted">{{ c.coll.video_count }} video{% if c.coll.video_count != 1 %}s{% endif %}</div>
+  </div>
+</a>
