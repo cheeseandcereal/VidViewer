@@ -6,7 +6,6 @@
 
 (() => {
     const $ = (sel, root = document) => root.querySelector(sel);
-    const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
     const addBtn = $('#btn-add-dir');
     const modal = $('#picker-modal');
@@ -21,11 +20,9 @@
     const status = $('#picker-status');
 
     let current = { path: '', parent: null, entries: [] };
-    let selected = null;
 
     function openPicker() {
         modal.hidden = false;
-        selected = null;
         load(null).catch(err => setStatus(String(err)));
     }
     function closePicker() {
@@ -59,11 +56,6 @@
             }
             li.dataset.path = e.path;
             li.addEventListener('click', () => {
-                $$('#picker-entries li').forEach(n => n.classList.remove('selected'));
-                li.classList.add('selected');
-                selected = e.path;
-            });
-            li.addEventListener('dblclick', () => {
                 if (e.readable) load(e.path);
             });
             entriesList.appendChild(li);
@@ -71,7 +63,7 @@
     }
 
     async function addSelected() {
-        const chosen = selected || current.path;
+        const chosen = current.path;
         setStatus('Adding…');
         const body = { path: chosen };
         const lbl = labelInput.value.trim();
