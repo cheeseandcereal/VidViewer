@@ -118,10 +118,10 @@ pub async fn get_detail(pool: &SqlitePool, id: &VideoId) -> Result<Option<VideoD
         .collect();
 
     Ok(Some(VideoDetail {
+        directory_id: video.directory_id,
         video,
         directory_label,
         directory_path,
-        directory_id: DirectoryId(dir_row.get::<i64, _>(0)),
         history,
         collections,
     }))
