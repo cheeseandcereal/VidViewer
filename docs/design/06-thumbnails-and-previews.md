@@ -51,16 +51,37 @@ Defaults:
 
 ### Generation
 
-A single ffmpeg invocation producing one JPEG tile sheet:
+A single ffmpeg invocation producing one JPEG tile sheet, but structured as **N
+input-seeked decodes tiled together via `xstack`** so ffmpeg does not need to
+read the entire source file front-to-back.
+
+The command shape is:
 
 ```
-ffmpeg -i <abs_path> \
-    -vf "fps=<count>/<duration>,scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2:black,tile=<cols>x<rows>" \
-    -frames:v 1 <cache>/previews/<video_id>.jpg
+ffmpeg -y \
+    -ss <T_0> -i <abs_path> \
+    -ss <T_1> -i <abs_path> \
+    ... -ss <T_{N-1}> -i <abs_path> \
+    -filter_complex "\
+        [0:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2:black[v0];\
+        [1:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale=...,pad=...[v1];\
+        ...;\
+        [v0][v1]...[v{N-1}]xstack=inputs=N:layout=0_0|160_0|...:fill=black[out]\
+    " \
+    -map "[out]" -frames:v 1 <cache>/previews/<video_id>.jpg
 ```
 
-For short videos where count is forced to 2 at 25%/75%, the two timestamps are selected
-with a `select` filter instead of `fps`, then tiled 2×1.
+- Each `-ss <t> -i <src>` pair uses **input-side seeking**: ffmpeg jumps to the
+  nearest keyframe ≤ `t` in the source and decodes only a small window forward
+  to yield one frame. Overall decode cost is O(N × seek-to-keyframe), not
+  O(total duration).
+- `xstack` with an explicit `layout=` string tiles the N single-frame streams
+  into one image. The layout string is built per-tile from the preview plan:
+  `col * tile_width` + `_` + `row * tile_height`, entries joined by `|`.
+- The preview plan (count, timestamps, grid, tile size) is computed by
+  `jobs::preview_plan::plan` and owns the math; the ffmpeg command builder is a
+  pure function in `src/video_tool/mod.rs::build_preview_command` (covered by a
+  unit test).
 
 On success, set `videos.preview_ok = 1`.
 
