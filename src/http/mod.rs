@@ -69,7 +69,11 @@ pub async fn serve(state: AppState) -> Result<()> {
 
     // Kick off an initial scan in the background if configured.
     if state.config.scan_on_startup {
-        let handle = crate::scanner::spawn_all(state.pool.clone(), state.clock.clone());
+        let handle = crate::scanner::spawn_all(
+            state.pool.clone(),
+            state.clock.clone(),
+            crate::scanner::CachePaths::from_config(&state.config),
+        );
         let mut reg = state.scans.write().await;
         reg.current = Some(handle);
     }

@@ -162,16 +162,17 @@ mod tests {
     use crate::directories::add as add_dir;
     use crate::scanner;
 
-    async fn setup() -> (tempfile::TempDir, SqlitePool, ClockRef) {
+    async fn setup() -> (tempfile::TempDir, SqlitePool, ClockRef, scanner::CachePaths) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config {
             data_dir: tmp.path().to_path_buf(),
             backup_dir: tmp.path().join("backups"),
             ..crate::config::Config::default()
         };
-        let db_path = tmp.path().join("vidviewer.db");
+        let db_path = cfg.database_path();
         let pool = crate::db::init(&cfg, &db_path).await.unwrap();
-        (tmp, pool, clock::system())
+        let cache = scanner::CachePaths::from_config(&cfg);
+        (tmp, pool, clock::system(), cache)
     }
 
     async fn video_id_in(pool: &SqlitePool) -> VideoId {
@@ -184,13 +185,13 @@ mod tests {
 
     #[tokio::test]
     async fn session_start_update_and_end() {
-        let (tmp, pool, clock) = setup().await;
+        let (tmp, pool, clock, cache) = setup().await;
         let videos_dir = tmp.path().join("videos");
         std::fs::create_dir_all(&videos_dir).unwrap();
         std::fs::write(videos_dir.join("a.mp4"), b"x").unwrap();
 
         add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
-        let _ = scanner::scan_all(&pool, &clock).await.unwrap();
+        let _ = scanner::scan_all(&pool, &clock, &cache).await.unwrap();
         // Set duration directly so end_session can evaluate completion.
         sqlx::query("UPDATE videos SET duration_secs = 100.0")
             .execute(&pool)

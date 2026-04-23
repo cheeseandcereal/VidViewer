@@ -378,6 +378,13 @@ mod tests {
     use crate::clock;
     use crate::directories::{add as add_dir, soft_remove};
 
+    fn test_cache(tmp: &std::path::Path) -> crate::scanner::CachePaths {
+        crate::scanner::CachePaths {
+            thumb: tmp.join("cache/thumbs"),
+            preview: tmp.join("cache/previews"),
+        }
+    }
+
     async fn setup() -> (tempfile::TempDir, SqlitePool) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config {
@@ -385,7 +392,7 @@ mod tests {
             backup_dir: tmp.path().join("backups"),
             ..crate::config::Config::default()
         };
-        let db_path = tmp.path().join("vidviewer.db");
+        let db_path = cfg.database_path();
         let pool = crate::db::init(&cfg, &db_path).await.unwrap();
         (tmp, pool)
     }
@@ -405,7 +412,10 @@ mod tests {
 
         let dir_a = add_dir(&pool, &clock, &a, None).await.unwrap();
         let _dir_b = add_dir(&pool, &clock, &b, None).await.unwrap();
-        crate::scanner::scan_all(&pool, &clock).await.unwrap();
+        let cache = test_cache(tmp.path());
+        crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
 
         // Two probe jobs enqueued; simulate one of them as 'running' to look like a crash.
         let a_video_id: String =
@@ -455,7 +465,10 @@ mod tests {
         std::fs::create_dir_all(&a).unwrap();
         std::fs::write(a.join("x.mp4"), b"x").unwrap();
         add_dir(&pool, &clock, &a, None).await.unwrap();
-        crate::scanner::scan_all(&pool, &clock).await.unwrap();
+        let cache = test_cache(tmp.path());
+        crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
 
         sqlx::query("UPDATE jobs SET status = 'running'")
             .execute(&pool)
@@ -476,7 +489,10 @@ mod tests {
         std::fs::create_dir_all(&a).unwrap();
         std::fs::write(a.join("x.mp4"), b"x").unwrap();
         add_dir(&pool, &clock, &a, None).await.unwrap();
-        crate::scanner::scan_all(&pool, &clock).await.unwrap();
+        let cache = test_cache(tmp.path());
+        crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
 
         let video_id: String = sqlx::query_scalar("SELECT id FROM videos LIMIT 1")
             .fetch_one(&pool)

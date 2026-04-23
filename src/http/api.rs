@@ -43,7 +43,12 @@ pub async fn add_directory(
     match directories::add(&state.pool, &state.clock, &path, req.label).await {
         Ok(dir) => {
             // Immediately kick off a scan for the newly-added directory.
-            let handle = scanner::spawn_one(state.pool.clone(), state.clock.clone(), dir.id);
+            let handle = scanner::spawn_one(
+                state.pool.clone(),
+                state.clock.clone(),
+                scanner::CachePaths::from_config(&state.config),
+                dir.id,
+            );
             {
                 let mut reg = state.scans.write().await;
                 reg.current = Some(handle);
@@ -130,9 +135,10 @@ pub struct ScanReq {
 
 pub async fn start_scan(State(state): State<AppState>, Query(q): Query<ScanReq>) -> Response {
     let only = q.dir_id.map(DirectoryId);
+    let cache = scanner::CachePaths::from_config(&state.config);
     let handle = match only {
-        Some(id) => scanner::spawn_one(state.pool.clone(), state.clock.clone(), id),
-        None => scanner::spawn_all(state.pool.clone(), state.clock.clone()),
+        Some(id) => scanner::spawn_one(state.pool.clone(), state.clock.clone(), cache, id),
+        None => scanner::spawn_all(state.pool.clone(), state.clock.clone(), cache),
     };
     {
         let mut reg = state.scans.write().await;

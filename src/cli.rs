@@ -178,13 +178,16 @@ async fn scan(cfg: &crate::config::Config, dry_run: bool, dir_id: Option<i64>) -
         }
         Ok(())
     } else {
-        let report = crate::scanner::scan_all(&pool, &clock).await?;
+        let cache = crate::scanner::CachePaths::from_config(cfg);
+        let report = crate::scanner::scan_all(&pool, &clock, &cache).await?;
         tracing::info!(
             dirs = report.directories_scanned,
             files = report.files_seen,
             new = report.new_videos,
             changed = report.changed_videos,
             missing = report.missing_videos,
+            recovered_thumb = report.recovered_thumbnail_jobs,
+            recovered_preview = report.recovered_preview_jobs,
             "scan complete"
         );
         Ok(())

@@ -12,7 +12,7 @@ use vidviewer::{
     db,
     directories::add as add_dir,
     jobs::worker::Workers,
-    scanner,
+    scanner::{self, CachePaths},
     video_tool::{MockVideoTool, ProbeResult, VideoToolRef},
 };
 
@@ -39,7 +39,8 @@ async fn probe_enqueues_thumbnail_and_preview() {
     std::fs::write(&video_path, b"xx").unwrap();
 
     add_dir(&pool, &clock, &videos, None).await.unwrap();
-    let _ = scanner::scan_all(&pool, &clock).await.unwrap();
+    let cache = CachePaths::from_config(&cfg);
+    let _ = scanner::scan_all(&pool, &clock, &cache).await.unwrap();
 
     // Pre-seed the mock probe result for this file.
     let mock = MockVideoTool::new();

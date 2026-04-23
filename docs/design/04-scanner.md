@@ -37,6 +37,17 @@ For each directory with `removed = 0`:
    - Mark `missing = 1`.
    - Delete the matching `collection_videos` row for the directory collection.
    - Leave custom collection memberships intact. Leave `watch_history` intact.
+5. **Cache verification.** For each video that survived the walk and is flagged
+   `thumbnail_ok = 1` or `preview_ok = 1`, check whether the expected cache file
+   exists on disk:
+   - `cache/thumbs/<video_id>.jpg` for thumbnails.
+   - `cache/previews/<video_id>.jpg` **and** `cache/previews/<video_id>.vtt` for previews
+     (only checked when `duration_secs` is known and positive).
+
+   If an expected file is missing, clear the corresponding flag and enqueue a new job.
+   This is the recovery path when a user has cleared or moved the cache directory.
+   Counters `recovered_thumbnail_jobs` / `recovered_preview_jobs` on `ScanReport` track
+   how many recoveries happened.
 
 ## Filename handling
 

@@ -28,6 +28,36 @@ pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "wmv", "mpg", "mpeg", "ts", "m2ts",
 ];
 
+/// Filesystem paths to the derived-asset cache. Passed to the scanner so it can verify
+/// that flagged-as-done outputs actually exist on disk; if a file is missing (cache was
+/// cleared, manual delete, etc.) the scanner clears the flag and re-enqueues the job.
+#[derive(Debug, Clone)]
+pub struct CachePaths {
+    pub thumb: PathBuf,
+    pub preview: PathBuf,
+}
+
+impl CachePaths {
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        Self {
+            thumb: cfg.thumb_cache_dir(),
+            preview: cfg.preview_cache_dir(),
+        }
+    }
+
+    fn thumb_path(&self, video_id: &VideoId) -> PathBuf {
+        self.thumb.join(format!("{}.jpg", video_id.as_str()))
+    }
+
+    fn preview_sheet_path(&self, video_id: &VideoId) -> PathBuf {
+        self.preview.join(format!("{}.jpg", video_id.as_str()))
+    }
+
+    fn preview_vtt_path(&self, video_id: &VideoId) -> PathBuf {
+        self.preview.join(format!("{}.vtt", video_id.as_str()))
+    }
+}
+
 /// A single scan pass plan (either real or dry-run).
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct ScanReport {
@@ -36,24 +66,40 @@ pub struct ScanReport {
     pub new_videos: u64,
     pub changed_videos: u64,
     pub missing_videos: u64,
+    /// Videos whose thumbnail file was missing on disk; the flag was cleared and a
+    /// thumbnail job was re-enqueued.
+    pub recovered_thumbnail_jobs: u64,
+    /// Videos whose preview tile sheet or VTT file was missing on disk; the flag was
+    /// cleared and a preview job was re-enqueued.
+    pub recovered_preview_jobs: u64,
     pub errors: Vec<String>,
 }
 
 /// Kick off a full scan of all non-removed directories in the background.
 /// Returns a `ScanHandle` whose task will populate progress as it goes.
-pub fn spawn_all(pool: SqlitePool, clock: ClockRef) -> ScanHandle {
-    spawn_inner(pool, clock, None)
+pub fn spawn_all(pool: SqlitePool, clock: ClockRef, cache: CachePaths) -> ScanHandle {
+    spawn_inner(pool, clock, cache, None)
 }
 
-pub fn spawn_one(pool: SqlitePool, clock: ClockRef, dir_id: DirectoryId) -> ScanHandle {
-    spawn_inner(pool, clock, Some(dir_id))
+pub fn spawn_one(
+    pool: SqlitePool,
+    clock: ClockRef,
+    cache: CachePaths,
+    dir_id: DirectoryId,
+) -> ScanHandle {
+    spawn_inner(pool, clock, cache, Some(dir_id))
 }
 
-fn spawn_inner(pool: SqlitePool, clock: ClockRef, only: Option<DirectoryId>) -> ScanHandle {
+fn spawn_inner(
+    pool: SqlitePool,
+    clock: ClockRef,
+    cache: CachePaths,
+    only: Option<DirectoryId>,
+) -> ScanHandle {
     let progress = std::sync::Arc::new(ScanProgress::default());
     let p2 = progress.clone();
     let handle: JoinHandle<Result<ScanReport>> = tokio::spawn(async move {
-        let res = scan(&pool, &clock, only, &p2).await;
+        let res = scan(&pool, &clock, &cache, only, &p2).await;
         match &res {
             Ok(report) => {
                 p2.phase.store(Phase::Done as u8, Ordering::SeqCst);
@@ -63,6 +109,8 @@ fn spawn_inner(pool: SqlitePool, clock: ClockRef, only: Option<DirectoryId>) -> 
                     new = report.new_videos,
                     changed = report.changed_videos,
                     missing = report.missing_videos,
+                    recovered_thumb = report.recovered_thumbnail_jobs,
+                    recovered_preview = report.recovered_preview_jobs,
                     "scan complete"
                 );
             }
@@ -86,6 +134,8 @@ pub struct ScanProgress {
     pub new_videos: AtomicU64,
     pub changed_videos: AtomicU64,
     pub missing_videos: AtomicU64,
+    pub recovered_thumbnail_jobs: AtomicU64,
+    pub recovered_preview_jobs: AtomicU64,
     pub error: std::sync::Mutex<Option<String>>,
 }
 
@@ -106,6 +156,7 @@ pub struct ScanHandle {
 pub async fn scan(
     pool: &SqlitePool,
     clock: &ClockRef,
+    cache: &CachePaths,
     only: Option<DirectoryId>,
     progress: &ScanProgress,
 ) -> Result<ScanReport> {
@@ -119,7 +170,7 @@ pub async fn scan(
     report.directories_scanned = dirs.len() as u32;
 
     for dir in dirs {
-        if let Err(err) = scan_one(pool, clock, &dir, progress, &mut report).await {
+        if let Err(err) = scan_one(pool, clock, cache, &dir, progress, &mut report).await {
             let msg = format!("scanning {}: {err:#}", dir.path);
             tracing::error!(directory = %dir.path, error = %format!("{err:#}"), "scan errored");
             report.errors.push(msg);
@@ -135,11 +186,15 @@ struct KnownVideo {
     size_bytes: i64,
     mtime_unix: i64,
     missing: bool,
+    thumbnail_ok: bool,
+    preview_ok: bool,
+    duration_secs: Option<f64>,
 }
 
 async fn scan_one(
     pool: &SqlitePool,
     clock: &ClockRef,
+    cache: &CachePaths,
     dir: &directories::Directory,
     progress: &ScanProgress,
     report: &mut ScanReport,
@@ -153,7 +208,8 @@ async fn scan_one(
 
     // 1. Load known videos into memory.
     let rows = sqlx::query(
-        "SELECT id, relative_path, size_bytes, mtime_unix, missing \
+        "SELECT id, relative_path, size_bytes, mtime_unix, missing, \
+            thumbnail_ok, preview_ok, duration_secs \
          FROM videos WHERE directory_id = ?",
     )
     .bind(dir.id.raw())
@@ -168,6 +224,9 @@ async fn scan_one(
         let size: i64 = row.get("size_bytes");
         let mtime: i64 = row.get("mtime_unix");
         let missing: i64 = row.get("missing");
+        let thumbnail_ok: i64 = row.get("thumbnail_ok");
+        let preview_ok: i64 = row.get("preview_ok");
+        let duration_secs: Option<f64> = row.get("duration_secs");
         known.insert(
             rel,
             KnownVideo {
@@ -175,9 +234,19 @@ async fn scan_one(
                 size_bytes: size,
                 mtime_unix: mtime,
                 missing: missing != 0,
+                thumbnail_ok: thumbnail_ok != 0,
+                preview_ok: preview_ok != 0,
+                duration_secs,
             },
         );
     }
+
+    // Collect videos that survive the walk (unchanged or updated) so we can verify
+    // their cache outputs at the end. We keep a (VideoId, thumbnail_ok, preview_ok,
+    // duration_secs) snapshot — post-walk DB state for those flags is consistent with
+    // what we saw, since the only mutation path that clears flags (change detected)
+    // is self-contained in `update_changed_video`.
+    let mut surviving: Vec<(VideoId, bool, bool, Option<f64>)> = Vec::new();
 
     // 2. Walk the directory.
     for entry in WalkDir::new(&root)
@@ -217,6 +286,9 @@ async fn scan_one(
                 insert_new_video(pool, clock, dir, &rel, &filename, size, mtime).await?;
                 progress.new_videos.fetch_add(1, Ordering::Relaxed);
                 report.new_videos += 1;
+                // Newly-inserted videos haven't generated anything yet; the probe job
+                // is already queued and will enqueue thumbnail+preview on completion.
+                // Skip the cache verification for them below.
             }
             Some(k) if k.size_bytes != size || k.mtime_unix != mtime || k.missing => {
                 update_changed_video(pool, clock, dir, &k.id, size, mtime, k.missing).await?;
@@ -224,9 +296,12 @@ async fn scan_one(
                     progress.changed_videos.fetch_add(1, Ordering::Relaxed);
                     report.changed_videos += 1;
                 }
+                // Content changed — flags were cleared and probe re-enqueued.
+                // Skip cache verification.
             }
-            Some(_) => {
-                // unchanged; no-op
+            Some(k) => {
+                // Unchanged: verify cache outputs at the end.
+                surviving.push((k.id, k.thumbnail_ok, k.preview_ok, k.duration_secs));
             }
         }
     }
@@ -244,6 +319,93 @@ async fn scan_one(
             relative_path = %rel,
             "marked missing"
         );
+    }
+
+    // 4. Verify cache files for unchanged videos. Re-enqueue jobs whose outputs
+    //    have been deleted (manual cache wipe, disk swap, etc.). We deliberately
+    //    check this only for videos that remain on disk in this scan pass.
+    for (video_id, thumbnail_ok, preview_ok, duration_secs) in surviving {
+        verify_cache_for_video(
+            pool,
+            clock,
+            cache,
+            &video_id,
+            thumbnail_ok,
+            preview_ok,
+            duration_secs,
+            progress,
+            report,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn verify_cache_for_video(
+    pool: &SqlitePool,
+    clock: &ClockRef,
+    cache: &CachePaths,
+    video_id: &VideoId,
+    thumbnail_ok: bool,
+    preview_ok: bool,
+    duration_secs: Option<f64>,
+    progress: &ScanProgress,
+    report: &mut ScanReport,
+) -> Result<()> {
+    // Thumbnail: expected if thumbnail_ok is set.
+    if thumbnail_ok {
+        let p = cache.thumb_path(video_id);
+        if !p.exists() {
+            let now_s = clock.now().to_rfc3339();
+            let mut tx = pool.begin().await.context("begin tx")?;
+            sqlx::query("UPDATE videos SET thumbnail_ok = 0, updated_at = ? WHERE id = ?")
+                .bind(&now_s)
+                .bind(video_id.as_str())
+                .execute(&mut *tx)
+                .await
+                .context("clearing thumbnail_ok")?;
+            jobs::enqueue_on(&mut tx, jobs::Kind::Thumbnail, video_id).await?;
+            tx.commit().await.context("commit tx")?;
+            progress
+                .recovered_thumbnail_jobs
+                .fetch_add(1, Ordering::Relaxed);
+            report.recovered_thumbnail_jobs += 1;
+            tracing::info!(
+                video_id = %video_id,
+                missing_cache = %p.display(),
+                "thumbnail cache missing; cleared flag and re-enqueued"
+            );
+        }
+    }
+
+    // Preview: expected if preview_ok is set AND duration is usable.
+    if preview_ok && duration_secs.unwrap_or(0.0) > 0.0 {
+        let sheet = cache.preview_sheet_path(video_id);
+        let vtt = cache.preview_vtt_path(video_id);
+        if !sheet.exists() || !vtt.exists() {
+            let now_s = clock.now().to_rfc3339();
+            let mut tx = pool.begin().await.context("begin tx")?;
+            sqlx::query("UPDATE videos SET preview_ok = 0, updated_at = ? WHERE id = ?")
+                .bind(&now_s)
+                .bind(video_id.as_str())
+                .execute(&mut *tx)
+                .await
+                .context("clearing preview_ok")?;
+            jobs::enqueue_on(&mut tx, jobs::Kind::Preview, video_id).await?;
+            tx.commit().await.context("commit tx")?;
+            progress
+                .recovered_preview_jobs
+                .fetch_add(1, Ordering::Relaxed);
+            report.recovered_preview_jobs += 1;
+            tracing::info!(
+                video_id = %video_id,
+                missing_sheet = %sheet.display(),
+                missing_vtt = %vtt.display(),
+                "preview cache missing; cleared flag and re-enqueued"
+            );
+        }
     }
 
     Ok(())
@@ -392,9 +554,13 @@ async fn add_to_directory_collection(
 }
 
 /// Convenience: just run a scan to completion, returning the report. Primarily for tests.
-pub async fn scan_all(pool: &SqlitePool, clock: &ClockRef) -> Result<ScanReport> {
+pub async fn scan_all(
+    pool: &SqlitePool,
+    clock: &ClockRef,
+    cache: &CachePaths,
+) -> Result<ScanReport> {
     let progress = ScanProgress::default();
-    scan(pool, clock, None, &progress).await
+    scan(pool, clock, cache, None, &progress).await
 }
 
 /// Produce a textual dry-run report for a directory. Does not write anything.
@@ -478,16 +644,17 @@ mod tests {
     use crate::clock::{self};
     use crate::directories::add as add_dir;
 
-    async fn setup() -> (tempfile::TempDir, SqlitePool, ClockRef) {
+    async fn setup() -> (tempfile::TempDir, SqlitePool, ClockRef, CachePaths) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config {
             data_dir: tmp.path().to_path_buf(),
             backup_dir: tmp.path().join("backups"),
             ..crate::config::Config::default()
         };
-        let db_path = tmp.path().join("vidviewer.db");
+        let db_path = cfg.database_path();
         let pool = crate::db::init(&cfg, &db_path).await.unwrap();
-        (tmp, pool, clock::system())
+        let cache = CachePaths::from_config(&cfg);
+        (tmp, pool, clock::system(), cache)
     }
 
     fn write_video(dir: &Path, name: &str, bytes: &[u8]) {
@@ -496,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn inserts_new_videos_and_enqueues_probe() {
-        let (tmp, pool, clock) = setup().await;
+        let (tmp, pool, clock, cache) = setup().await;
         let videos_dir = tmp.path().join("videos");
         std::fs::create_dir_all(&videos_dir).unwrap();
         write_video(&videos_dir, "a.mp4", b"x");
@@ -504,7 +671,7 @@ mod tests {
         write_video(&videos_dir, "not-a-video.txt", b"skip");
 
         add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
-        let report = scan_all(&pool, &clock).await.unwrap();
+        let report = scan_all(&pool, &clock, &cache).await.unwrap();
         assert_eq!(report.new_videos, 2);
         assert_eq!(report.files_seen, 2, "expected only video files counted");
         assert_eq!(report.changed_videos, 0);
@@ -516,29 +683,31 @@ mod tests {
 
     #[tokio::test]
     async fn second_scan_is_noop() {
-        let (tmp, pool, clock) = setup().await;
+        let (tmp, pool, clock, cache) = setup().await;
         let videos_dir = tmp.path().join("videos");
         std::fs::create_dir_all(&videos_dir).unwrap();
         write_video(&videos_dir, "a.mp4", b"x");
 
         add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
-        let _ = scan_all(&pool, &clock).await.unwrap();
-        let report = scan_all(&pool, &clock).await.unwrap();
+        let _ = scan_all(&pool, &clock, &cache).await.unwrap();
+        let report = scan_all(&pool, &clock, &cache).await.unwrap();
         assert_eq!(report.new_videos, 0);
         assert_eq!(report.changed_videos, 0);
         assert_eq!(report.missing_videos, 0);
+        assert_eq!(report.recovered_thumbnail_jobs, 0);
+        assert_eq!(report.recovered_preview_jobs, 0);
     }
 
     #[tokio::test]
     async fn detects_change_and_missing() {
-        let (tmp, pool, clock) = setup().await;
+        let (tmp, pool, clock, cache) = setup().await;
         let videos_dir = tmp.path().join("videos");
         std::fs::create_dir_all(&videos_dir).unwrap();
         write_video(&videos_dir, "a.mp4", b"x");
         write_video(&videos_dir, "b.mp4", b"y");
 
         add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
-        let _ = scan_all(&pool, &clock).await.unwrap();
+        let _ = scan_all(&pool, &clock, &cache).await.unwrap();
 
         // Modify a.mp4 and delete b.mp4. Force mtime change.
         std::fs::write(videos_dir.join("a.mp4"), b"xxxx").unwrap();
@@ -550,7 +719,7 @@ mod tests {
         .unwrap();
         std::fs::remove_file(videos_dir.join("b.mp4")).unwrap();
 
-        let report = scan_all(&pool, &clock).await.unwrap();
+        let report = scan_all(&pool, &clock, &cache).await.unwrap();
         assert_eq!(report.new_videos, 0);
         assert_eq!(report.changed_videos, 1);
         assert_eq!(report.missing_videos, 1);
@@ -565,5 +734,90 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn recovers_missing_thumbnail_and_preview_cache() {
+        let (tmp, pool, clock, cache) = setup().await;
+        let videos_dir = tmp.path().join("videos");
+        std::fs::create_dir_all(&videos_dir).unwrap();
+        write_video(&videos_dir, "a.mp4", b"x");
+
+        add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+        let _ = scan_all(&pool, &clock, &cache).await.unwrap();
+
+        // Fake a "previously completed" state: mark thumbnail_ok and preview_ok,
+        // give the video a duration, and clear the initial probe job so we can
+        // isolate the recovery behavior.
+        let video_id: String = sqlx::query_scalar("SELECT id FROM videos LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE videos SET thumbnail_ok = 1, preview_ok = 1, \
+                duration_secs = 60.0 WHERE id = ?",
+        )
+        .bind(&video_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE jobs SET status = 'done'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Pretend the cache was populated, then wiped. We never actually write the
+        // files; running the scan with flags set but nothing on disk should detect
+        // the discrepancy and re-enqueue.
+        std::fs::create_dir_all(&cache.thumb).unwrap();
+        std::fs::create_dir_all(&cache.preview).unwrap();
+
+        let report = scan_all(&pool, &clock, &cache).await.unwrap();
+        assert_eq!(report.recovered_thumbnail_jobs, 1);
+        assert_eq!(report.recovered_preview_jobs, 1);
+
+        // Flags cleared.
+        let (thumb_ok, preview_ok): (i64, i64) =
+            sqlx::query_as("SELECT thumbnail_ok, preview_ok FROM videos LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(thumb_ok, 0);
+        assert_eq!(preview_ok, 0);
+
+        // Jobs re-enqueued.
+        let pending_thumb: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE kind = 'thumbnail' AND status = 'pending'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let pending_preview: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM jobs WHERE kind = 'preview' AND status = 'pending'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending_thumb, 1);
+        assert_eq!(pending_preview, 1);
+
+        // Now create the expected cache files and re-scan: recovery counters stay at 0.
+        std::fs::write(cache.thumb.join(format!("{video_id}.jpg")), b"x").unwrap();
+        std::fs::write(cache.preview.join(format!("{video_id}.jpg")), b"x").unwrap();
+        std::fs::write(cache.preview.join(format!("{video_id}.vtt")), b"WEBVTT\n").unwrap();
+        // Mark the flags back to 1 and done out the re-enqueued jobs so the next
+        // scan has something to verify.
+        sqlx::query("UPDATE videos SET thumbnail_ok = 1, preview_ok = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET status = 'done' WHERE status = 'pending'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let report = scan_all(&pool, &clock, &cache).await.unwrap();
+        assert_eq!(report.recovered_thumbnail_jobs, 0);
+        assert_eq!(report.recovered_preview_jobs, 0);
     }
 }

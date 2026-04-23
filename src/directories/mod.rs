@@ -484,7 +484,13 @@ mod tests {
         std::fs::write(videos.join("b.mp4"), b"y").unwrap();
 
         add(&pool, &clock, &videos, None).await.unwrap();
-        let _ = crate::scanner::scan_all(&pool, &clock).await.unwrap();
+        let cache = crate::scanner::CachePaths {
+            thumb: tmp.path().join("thumbs"),
+            preview: tmp.path().join("previews"),
+        };
+        let _ = crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
 
         // Two probe jobs were enqueued as 'pending'. Mark one as 'running' to simulate
         // a worker that has claimed it mid-flight.
