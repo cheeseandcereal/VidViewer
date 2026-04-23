@@ -15,6 +15,7 @@ pub mod api;
 pub mod debug;
 pub mod error;
 pub mod pages;
+pub mod static_assets;
 
 pub async fn serve(state: AppState) -> Result<()> {
     let port = state.config.port;
@@ -96,7 +97,6 @@ pub async fn serve(state: AppState) -> Result<()> {
 }
 
 pub(crate) fn router(state: AppState) -> Router {
-    let static_dir = ServeDir::new("static");
     let thumbs_dir = ServeDir::new(state.config.thumb_cache_dir());
     let previews_dir = ServeDir::new(state.config.preview_cache_dir());
 
@@ -158,7 +158,7 @@ pub(crate) fn router(state: AppState) -> Router {
             axum::routing::get(api::directory_job_status),
         )
         .route("/debug", axum::routing::get(debug::debug_dump))
-        .nest_service("/static", static_dir)
+        .route("/static/*path", axum::routing::get(static_assets::serve))
         .nest_service("/thumbs", thumbs_dir)
         .nest_service("/previews", previews_dir)
         .layer(TraceLayer::new_for_http())
@@ -263,5 +263,46 @@ mod tests {
         let s = std::str::from_utf8(&body).unwrap();
         assert!(s.contains("<!doctype html>"));
         assert!(s.contains("Noto Sans CJK") || s.contains("/static/app.css"));
+    }
+
+    #[tokio::test]
+    async fn static_app_css_served_from_embedded_assets() {
+        let app = router(test_state().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/static/app.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ctype = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ctype.starts_with("text/css"), "got {ctype}");
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(!body.is_empty(), "embedded app.css should have content");
+    }
+
+    #[tokio::test]
+    async fn static_unknown_path_returns_404() {
+        let app = router(test_state().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/static/does-not-exist.xyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

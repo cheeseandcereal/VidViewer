@@ -64,8 +64,10 @@ just install       # cargo install --path . (copies to ~/.cargo/bin)
 ```
 
 Release builds statically link all Rust code and crates; Linux system libraries
-(glibc, libm, libpthread) link dynamically. Templates and SQL migrations are
-embedded into the binary at compile time.
+(glibc, libm, libpthread) link dynamically. Templates, SQL migrations, and
+static assets (CSS/JS) are all embedded into the binary at compile time, so
+`target/release/vidviewer` is self-contained and can be moved to any directory
+and run.
 
 See [AGENTS.md](./AGENTS.md) for conventions (Conventional Commits, schema migration rules,
 UTF-8 hygiene, trait-bound external process boundaries) and [`docs/`](./docs/) for the full
