@@ -51,37 +51,49 @@ Defaults:
 
 ### Generation
 
-A single ffmpeg invocation producing one JPEG tile sheet, but structured as **N
-input-seeked decodes tiled together via `xstack`** so ffmpeg does not need to
-read the entire source file front-to-back.
+Preview generation is a two-step process that bounds memory per ffmpeg invocation
+to a single decoder context, regardless of how many previews a video has.
 
-The command shape is:
+**Step 1 — per-timestamp extraction (serial).** For each timestamp in the preview
+plan, a separate ffmpeg invocation uses input-side seek and writes a small JPEG to
+a scratch directory:
 
 ```
-ffmpeg -y \
-    -ss <T_0> -i <abs_path> \
-    -ss <T_1> -i <abs_path> \
-    ... -ss <T_{N-1}> -i <abs_path> \
-    -filter_complex "\
-        [0:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2:black[v0];\
-        [1:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale=...,pad=...[v1];\
-        ...;\
-        [v0][v1]...[v{N-1}]xstack=inputs=N:layout=0_0|160_0|...:fill=black[out]\
-    " \
-    -map "[out]" -frames:v 1 <cache>/previews/<video_id>.jpg
+ffmpeg -y -ss <T_i> -i <abs_path> \
+    -frames:v 1 \
+    -vf scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2:black \
+    <scratch>/<i:03>.jpg
 ```
 
-- Each `-ss <t> -i <src>` pair uses **input-side seeking**: ffmpeg jumps to the
-  nearest keyframe ≤ `t` in the source and decodes only a small window forward
-  to yield one frame. Overall decode cost is O(N × seek-to-keyframe), not
-  O(total duration).
-- `xstack` with an explicit `layout=` string tiles the N single-frame streams
-  into one image. The layout string is built per-tile from the preview plan:
-  `col * tile_width` + `_` + `row * tile_height`, entries joined by `|`.
-- The preview plan (count, timestamps, grid, tile size) is computed by
-  `jobs::preview_plan::plan` and owns the math; the ffmpeg command builder is a
-  pure function in `src/video_tool/mod.rs::build_preview_command` (covered by a
-  unit test).
+Scratch path: `<cache>/previews/scratch/<video_id>/<NNN>.jpg`. Cleaned up on
+success and failure via an RAII guard in Rust.
+
+If one per-timestamp extraction fails (malformed container, missing seek index for
+a given spot, etc.), the scanner logs a warning and substitutes the previously
+successful tile so the final tile sheet stays complete. A `partial_tiles` count is
+logged at job end. If frame 0 fails and the immediate successor also fails, the
+whole job fails.
+
+**Step 2 — tile pass.** A single ffmpeg invocation reads the scratch frames via
+the `image2` demuxer and assembles them:
+
+```
+ffmpeg -y -start_number 0 -framerate 1 -i <scratch>/%03d.jpg \
+    -frames:v 1 -vframes <count> \
+    -vf tile=<cols>x<rows> \
+    <cache>/previews/<video_id>.jpg
+```
+
+One input, small JPEG frames → bounded memory regardless of tile count.
+
+### Why this shape
+
+An earlier attempt used a single ffmpeg with N `-ss T_i -i <src>` input pairs plus
+`xstack`. That produced a correct tile sheet but kept N full decoder contexts
+resident simultaneously and pinned buffered frames in `xstack` while it waited to
+synchronize all inputs, driving memory into the tens of GB on long h264/hevc
+videos. The split into N small processes + one tiling process bounds memory at
+one decoder context at a time.
 
 On success, set `videos.preview_ok = 1`.
 

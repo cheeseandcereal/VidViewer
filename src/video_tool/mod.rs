@@ -140,108 +140,224 @@ impl VideoTool for FfmpegTool {
         if plan.count == 0 {
             bail!("preview plan has zero count");
         }
-        let _ = duration_secs; // retained in trait signature for compatibility; no longer needed here
+        let _ = duration_secs; // retained in trait signature for compatibility
+
         if let Some(parent) = dst.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        let args = build_preview_command(src, dst, plan);
-
-        let status = tokio::process::Command::new("ffmpeg")
-            .args(&args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .with_context(|| format!("spawning ffmpeg for preview of {}", src.display()))?;
-        if !status.success() {
-            bail!("ffmpeg failed to produce preview for {}", src.display());
+        // Scratch directory, unique per destination (dst stem is the video id).
+        // Wiped on entry (in case of stale data from a prior aborted run) and on exit
+        // via `ScratchDirGuard` on drop.
+        let scratch_dir = preview_scratch_dir(dst);
+        let _guard = ScratchDirGuard::new(scratch_dir.clone());
+        if scratch_dir.exists() {
+            let _ = tokio::fs::remove_dir_all(&scratch_dir).await;
         }
+        tokio::fs::create_dir_all(&scratch_dir)
+            .await
+            .with_context(|| format!("creating scratch {}", scratch_dir.display()))?;
+
+        // 1. Per-timestamp extraction, serial to keep memory bounded.
+        //    Each ffmpeg opens `src` exactly once, input-seeks to near its target
+        //    keyframe, decodes one frame, writes a tiny JPEG, exits. Memory per
+        //    process is bounded by one decoder context.
+        let mut partial_tiles: u32 = 0;
+        let mut last_successful_scratch: Option<PathBuf> = None;
+        for (i, &t) in plan.timestamps.iter().enumerate() {
+            let scratch_path = scratch_tile_path(&scratch_dir, i);
+            let args = build_single_frame_command(
+                src,
+                &scratch_path,
+                t,
+                plan.tile_width,
+                plan.tile_height,
+            );
+            let ok = run_ffmpeg_silent(&args)
+                .await
+                .with_context(|| format!("spawning ffmpeg for preview frame {i}"))?;
+            if ok {
+                last_successful_scratch = Some(scratch_path);
+                continue;
+            }
+
+            // Failure on this tile. Fall back to the most recent successful tile
+            // so the final tile sheet still has something at this position.
+            tracing::warn!(
+                video = %src.display(),
+                tile_index = i,
+                at_secs = t,
+                "preview frame extraction failed; substituting neighbor tile"
+            );
+            partial_tiles += 1;
+            if let Some(src_tile) = last_successful_scratch.as_ref() {
+                tokio::fs::copy(src_tile, &scratch_path)
+                    .await
+                    .with_context(|| {
+                        format!("copying fallback tile to {}", scratch_path.display())
+                    })?;
+            } else {
+                // No previous tile yet; try the next timestamp immediately, backfill if it
+                // succeeds, else bail.
+                if i + 1 >= plan.timestamps.len() {
+                    bail!("preview extraction failed at tile 0 with no successor");
+                }
+                let next_t = plan.timestamps[i + 1];
+                let args = build_single_frame_command(
+                    src,
+                    &scratch_path,
+                    next_t,
+                    plan.tile_width,
+                    plan.tile_height,
+                );
+                let ok = run_ffmpeg_silent(&args)
+                    .await
+                    .with_context(|| "spawning ffmpeg for backfill preview frame")?;
+                if !ok {
+                    bail!("preview extraction failed at tile 0 and backfill also failed");
+                }
+                last_successful_scratch = Some(scratch_path);
+            }
+        }
+
+        if partial_tiles > 0 {
+            tracing::info!(
+                video = %src.display(),
+                partial_tiles,
+                total = plan.count,
+                "preview completed with fallback tiles"
+            );
+        }
+
+        // 2. Tile pass. A single ffmpeg input reads `%0Nd.jpg` from the scratch dir
+        //    and emits one tile sheet. N small JPEG inputs → tiny memory footprint.
+        let tile_args =
+            build_tile_from_scratch_command(&scratch_dir, dst, plan.cols, plan.rows, plan.count);
+        let ok = run_ffmpeg_silent(&tile_args)
+            .await
+            .with_context(|| format!("spawning ffmpeg to tile preview sheet {}", dst.display()))?;
+        if !ok {
+            bail!("ffmpeg tile pass failed for {}", dst.display());
+        }
+
         Ok(())
     }
 }
 
-/// Build the ffmpeg argument list for generating a preview tile sheet via
-/// per-timestamp input-seeked decodes and `xstack` tiling.
+/// Build the ffmpeg args to extract a single frame at timestamp `t`, scaled and
+/// padded to tile dimensions, written to `dst` as a JPEG.
 ///
-/// The produced command:
-///   * opens `src` once per preview timestamp with its own `-ss <t>`, so each decode
-///     only processes the bitstream near the target keyframe (fast, bounded by GOP size),
-///   * selects exactly one frame per input stream with `trim=end_frame=1` + normalized PTS,
-///   * scales and pads each tile to the configured dimensions,
-///   * tiles all inputs into a single output image using `xstack` with an explicit
-///     `layout=` (which works on every ffmpeg 4+; `grid=` is 6.0+).
-///
-/// Returns the vector of `OsString` args to pass to `ffmpeg`.
-fn build_preview_command(src: &Path, dst: &Path, plan: &PreviewPlan) -> Vec<std::ffi::OsString> {
+/// Uses input-side seek (`-ss` before `-i`) so ffmpeg jumps to the nearest keyframe
+/// instead of decoding from the start. One input, one frame, tiny memory footprint.
+fn build_single_frame_command(
+    src: &Path,
+    dst: &Path,
+    t_secs: f64,
+    tile_width: u32,
+    tile_height: u32,
+) -> Vec<std::ffi::OsString> {
     use std::ffi::OsString;
-
-    let mut args: Vec<OsString> = Vec::with_capacity(6 + 4 * plan.count as usize);
-    args.push("-y".into());
-
-    // Per-timestamp inputs, each with its own `-ss` before `-i`.
-    for &t in &plan.timestamps {
-        args.push("-ss".into());
-        args.push(format!("{t:.6}").into());
-        args.push("-i".into());
-        args.push(src.into());
-    }
-
-    // Build filter_complex: scale+pad each input to a single tile, then xstack.
-    let mut filter = String::new();
-    for i in 0..plan.count {
-        if !filter.is_empty() {
-            filter.push(';');
-        }
-        let _ = std::fmt::Write::write_fmt(
-            &mut filter,
-            format_args!(
-                "[{i}:v]trim=end_frame=1,setpts=PTS-STARTPTS,\
-                 scale={w}:{h}:force_original_aspect_ratio=decrease,\
-                 pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black[v{i}]",
-                i = i,
-                w = plan.tile_width,
-                h = plan.tile_height,
-            ),
-        );
-    }
-
-    // Input list for xstack.
-    filter.push(';');
-    for i in 0..plan.count {
-        let _ = std::fmt::Write::write_fmt(&mut filter, format_args!("[v{i}]"));
-    }
-    // Explicit layout string: col*tile_width _ row*tile_height, separated by '|'.
-    let mut layout = String::new();
-    for i in 0..plan.count {
-        if !layout.is_empty() {
-            layout.push('|');
-        }
-        let col = i % plan.cols;
-        let row = i / plan.cols;
-        let x = col * plan.tile_width;
-        let y = row * plan.tile_height;
-        let _ = std::fmt::Write::write_fmt(&mut layout, format_args!("{x}_{y}"));
-    }
-    let _ = std::fmt::Write::write_fmt(
-        &mut filter,
-        format_args!(
-            "xstack=inputs={n}:layout={layout}:fill=black[out]",
-            n = plan.count,
-            layout = layout,
-        ),
+    let vf = format!(
+        "scale={w}:{h}:force_original_aspect_ratio=decrease,\
+         pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black",
+        w = tile_width,
+        h = tile_height,
     );
-
-    args.push("-filter_complex".into());
-    args.push(filter.into());
-    args.push("-map".into());
-    args.push("[out]".into());
+    let mut args: Vec<OsString> = Vec::with_capacity(12);
+    args.push("-y".into());
+    args.push("-ss".into());
+    args.push(format!("{t_secs:.6}").into());
+    args.push("-i".into());
+    args.push(src.into());
     args.push("-frames:v".into());
     args.push("1".into());
+    args.push("-vf".into());
+    args.push(vf.into());
     args.push(dst.into());
     args
+}
+
+/// Build the ffmpeg args for the final tile pass: read `NNN.jpg` files from `scratch`
+/// and assemble them into a single tile sheet at `dst`.
+///
+/// Uses the `image2` demuxer with `-start_number 0` and `%03d.jpg` pattern so the tile
+/// filter sees the frames in plan order. One ffmpeg input, many small JPEGs → bounded
+/// memory regardless of tile count.
+fn build_tile_from_scratch_command(
+    scratch: &Path,
+    dst: &Path,
+    cols: u32,
+    rows: u32,
+    count: u32,
+) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    let pattern = scratch.join("%03d.jpg");
+    let vf = format!("tile={cols}x{rows}");
+    let args: Vec<OsString> = vec![
+        "-y".into(),
+        "-start_number".into(),
+        "0".into(),
+        "-framerate".into(),
+        "1".into(), // arbitrary; we cap output frames below.
+        "-i".into(),
+        pattern.into(),
+        "-frames:v".into(),
+        "1".into(),
+        "-vframes".into(),
+        count.to_string().into(),
+        "-vf".into(),
+        vf.into(),
+        dst.into(),
+    ];
+    args
+}
+
+fn scratch_tile_path(scratch_dir: &Path, index: usize) -> PathBuf {
+    scratch_dir.join(format!("{index:03}.jpg"))
+}
+
+fn preview_scratch_dir(dst: &Path) -> PathBuf {
+    // dst is e.g. <cache>/previews/<video_id>.jpg; scratch lives alongside as
+    // <cache>/previews/scratch/<video_id>/.
+    let parent = dst
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let stem = dst
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("preview");
+    parent.join("scratch").join(stem)
+}
+
+/// Best-effort cleanup of a scratch directory on drop (success or failure).
+struct ScratchDirGuard {
+    path: PathBuf,
+}
+
+impl ScratchDirGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for ScratchDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+async fn run_ffmpeg_silent(args: &[std::ffi::OsString]) -> Result<bool> {
+    let status = tokio::process::Command::new("ffmpeg")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .context("spawning ffmpeg")?;
+    Ok(status.success())
 }
 
 pub fn ffmpeg(_cfg: &Config) -> VideoToolRef {
@@ -429,44 +545,88 @@ mod tests {
     }
 
     #[test]
-    fn preview_command_has_one_input_per_timestamp_and_xstack() {
-        let plan = PreviewPlan {
-            count: 4,
-            timestamps: vec![1.0, 3.0, 5.0, 7.0],
-            cols: 2,
-            rows: 2,
-            tile_width: 160,
-            tile_height: 90,
-        };
-        let args = build_preview_command(
+    fn single_frame_command_uses_input_side_seek() {
+        let args = build_single_frame_command(
             Path::new("/tmp/src.mp4"),
-            Path::new("/tmp/sheet.jpg"),
-            &plan,
+            Path::new("/tmp/scratch/003.jpg"),
+            12.75,
+            160,
+            90,
         );
-
-        // Should have one `-ss <t> -i <src>` group per timestamp.
-        let ss_count = args.iter().filter(|a| a.to_string_lossy() == "-ss").count();
-        let input_count = args.iter().filter(|a| a.to_string_lossy() == "-i").count();
-        assert_eq!(ss_count, 4);
-        assert_eq!(input_count, 4);
-
-        // filter_complex must reference xstack and an explicit layout.
-        let filter_idx = args
+        // `-ss` must appear before `-i`.
+        let ss_pos = args
             .iter()
-            .position(|a| a.to_string_lossy() == "-filter_complex")
-            .expect("missing -filter_complex");
-        let filter = args[filter_idx + 1].to_string_lossy().into_owned();
-        assert!(filter.contains("xstack=inputs=4"), "filter: {filter}");
-        assert!(
-            filter.contains("layout=0_0|160_0|0_90|160_90"),
-            "expected 2x2 layout, got: {filter}"
-        );
-        assert!(filter.contains("trim=end_frame=1"));
-        assert!(filter.contains("pad=160:90"));
+            .position(|a| a.to_string_lossy() == "-ss")
+            .expect("missing -ss");
+        let i_pos = args
+            .iter()
+            .position(|a| a.to_string_lossy() == "-i")
+            .expect("missing -i");
+        assert!(ss_pos < i_pos, "expected -ss before -i");
 
-        // Output args.
-        assert!(args.iter().any(|a| a.to_string_lossy() == "-map"));
-        assert!(args.iter().any(|a| a.to_string_lossy() == "[out]"));
-        assert!(args.iter().any(|a| a.to_string_lossy() == "-frames:v"));
+        // Seek timestamp formatted to 6 decimals.
+        let ss_val = args[ss_pos + 1].to_string_lossy().into_owned();
+        assert_eq!(ss_val, "12.750000");
+
+        // Exactly one input, exactly one output frame.
+        assert_eq!(
+            args.iter().filter(|a| a.to_string_lossy() == "-i").count(),
+            1
+        );
+        let frames_pos = args
+            .iter()
+            .position(|a| a.to_string_lossy() == "-frames:v")
+            .expect("missing -frames:v");
+        assert_eq!(args[frames_pos + 1].to_string_lossy(), "1");
+
+        // Scale+pad for tile dimensions.
+        let vf_pos = args
+            .iter()
+            .position(|a| a.to_string_lossy() == "-vf")
+            .expect("missing -vf");
+        let vf = args[vf_pos + 1].to_string_lossy().into_owned();
+        assert!(vf.contains("scale=160:90"), "vf: {vf}");
+        assert!(vf.contains("pad=160:90"), "vf: {vf}");
+    }
+
+    #[test]
+    fn tile_from_scratch_command_reads_numbered_pattern() {
+        let args = build_tile_from_scratch_command(
+            Path::new("/tmp/scratch/abc"),
+            Path::new("/tmp/sheet.jpg"),
+            5,
+            3,
+            15,
+        );
+        // Single input (`image2` pattern).
+        assert_eq!(
+            args.iter().filter(|a| a.to_string_lossy() == "-i").count(),
+            1
+        );
+        let i_pos = args
+            .iter()
+            .position(|a| a.to_string_lossy() == "-i")
+            .unwrap();
+        let pattern = args[i_pos + 1].to_string_lossy().into_owned();
+        assert!(pattern.ends_with("%03d.jpg"), "pattern: {pattern}");
+
+        // Tile filter with correct grid.
+        let vf_pos = args
+            .iter()
+            .position(|a| a.to_string_lossy() == "-vf")
+            .unwrap();
+        assert_eq!(args[vf_pos + 1].to_string_lossy(), "tile=5x3");
+    }
+
+    #[test]
+    fn scratch_tile_path_is_zero_padded() {
+        let p = scratch_tile_path(Path::new("/x"), 7);
+        assert_eq!(p, PathBuf::from("/x/007.jpg"));
+    }
+
+    #[test]
+    fn preview_scratch_dir_sits_next_to_dst() {
+        let d = preview_scratch_dir(Path::new("/cache/previews/abc-123.jpg"));
+        assert_eq!(d, PathBuf::from("/cache/previews/scratch/abc-123"));
     }
 }
