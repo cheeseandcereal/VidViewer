@@ -104,6 +104,12 @@ CREATE TABLE jobs (
     updated_at  TEXT    NOT NULL
 );
 CREATE INDEX idx_jobs_status ON jobs(status);
+
+-- At most one outstanding (pending or running) job per (kind, video_id).
+-- Enforced at the DB layer as a safety net for the idempotent enqueue path.
+CREATE UNIQUE INDEX idx_jobs_outstanding_unique
+    ON jobs(kind, video_id)
+    WHERE status IN ('pending', 'running');
 ```
 
 ### `ui_state`

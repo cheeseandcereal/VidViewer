@@ -47,12 +47,40 @@ impl Status {
     }
 }
 
-/// Enqueue a job on a specific connection. Returns the new job id.
+/// Enqueue a job on a specific connection. Returns the job id.
+///
+/// This is idempotent per `(kind, video_id)`: if there's already a `pending` or
+/// `running` job for the same kind+video, no new row is inserted and the existing
+/// id is returned. This prevents duplicate ffmpeg processes being spawned for the
+/// same work (e.g. if the scanner re-enqueues before the worker picks up the previous
+/// job, or if probe finishes and re-enqueues thumbnail/preview that already exist).
 pub async fn enqueue_on(
     conn: &mut SqliteConnection,
     kind: Kind,
     video_id: &VideoId,
 ) -> Result<i64> {
+    // Is there already an outstanding job for this (kind, video)?
+    if let Some(row) = sqlx::query(
+        "SELECT id FROM jobs \
+         WHERE kind = ? AND video_id = ? AND status IN ('pending', 'running') \
+         LIMIT 1",
+    )
+    .bind(kind.as_str())
+    .bind(video_id.as_str())
+    .fetch_optional(&mut *conn)
+    .await
+    .context("checking for existing outstanding job")?
+    {
+        let id: i64 = row.get(0);
+        tracing::debug!(
+            job_id = id,
+            kind = kind.as_str(),
+            video_id = %video_id,
+            "enqueue skipped: outstanding job already exists"
+        );
+        return Ok(id);
+    }
+
     let now_s = Utc::now().to_rfc3339();
     let row = sqlx::query(
         "INSERT INTO jobs (kind, video_id, status, created_at, updated_at) \
@@ -437,5 +465,57 @@ mod tests {
         let (pending, running, _, _) = count_by_status(&pool).await.unwrap();
         assert_eq!(pending, 1);
         assert_eq!(running, 0);
+    }
+
+    #[tokio::test]
+    async fn enqueue_is_idempotent_for_outstanding_jobs() {
+        let (tmp, pool) = setup().await;
+        let clock = clock::system();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::write(a.join("x.mp4"), b"x").unwrap();
+        add_dir(&pool, &clock, &a, None).await.unwrap();
+        crate::scanner::scan_all(&pool, &clock).await.unwrap();
+
+        let video_id: String = sqlx::query_scalar("SELECT id FROM videos LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let vid = crate::ids::VideoId(video_id);
+
+        // A probe was already enqueued by the scanner. A redundant enqueue returns
+        // the same id and does not duplicate.
+        let initial_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'probe'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(initial_count, 1);
+
+        let mut conn = pool.acquire().await.unwrap();
+        enqueue_on(&mut conn, Kind::Probe, &vid).await.unwrap();
+        enqueue_on(&mut conn, Kind::Probe, &vid).await.unwrap();
+        drop(conn);
+
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'probe'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, 1, "duplicate enqueues must not insert new rows");
+
+        // Once the job is done, re-enqueueing should create a fresh pending row
+        // (so you can retry after a failure, or re-run after regeneration).
+        sqlx::query("UPDATE jobs SET status = 'done'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        enqueue_on(&mut conn, Kind::Probe, &vid).await.unwrap();
+        drop(conn);
+        let after_redo: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'probe'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after_redo, 2, "new enqueue after done must succeed");
     }
 }
