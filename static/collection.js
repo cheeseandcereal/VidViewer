@@ -1,8 +1,11 @@
-// Collection page: Random button, rename/delete (for custom collections).
+// Collection page: Random, rename/delete for custom, manage included directories.
 
 (() => {
     const grid = document.querySelector('.video-grid');
-    const cid = grid?.dataset.collectionId;
+    const dirRow = document.querySelector('.coll-dirs');
+    // collectionId is available whenever the grid is rendered; for empty custom
+    // collections there is no grid, so fall back to the dir-row element.
+    const cid = grid?.dataset.collectionId || dirRow?.dataset.collectionId;
     const randomBtn = document.getElementById('btn-random');
     const renameBtn = document.getElementById('btn-rename');
     const deleteBtn = document.getElementById('btn-delete');
@@ -31,7 +34,7 @@
         const t = ev.target;
         if (t instanceof HTMLElement) {
             const tag = t.tagName;
-            if (tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable) return;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) return;
         }
         ev.preventDefault();
         goRandom();
@@ -54,7 +57,7 @@
     });
 
     if (deleteBtn) deleteBtn.addEventListener('click', async () => {
-        if (!confirm('Delete this collection? Videos themselves are not deleted.')) return;
+        if (!confirm('Delete this collection? The underlying videos and directories are not deleted.')) return;
         const resp = await fetch(`/api/collections/${encodeURIComponent(cid)}`, { method: 'DELETE' });
         if (!resp.ok) {
             alert('Delete failed');
@@ -62,4 +65,70 @@
         }
         window.location.href = '/';
     });
+
+    // ---- Member directory management (custom collections only) ----
+
+    if (dirRow) {
+        // Wire up remove buttons on each chip.
+        dirRow.querySelectorAll('.coll-dir-chip').forEach(chip => {
+            const did = chip.dataset.directoryId;
+            const removeBtn = chip.querySelector('.chip-remove');
+            if (!removeBtn) return;
+            removeBtn.addEventListener('click', async ev => {
+                ev.preventDefault();
+                const label = chip.querySelector('[data-directory-label]')?.textContent?.trim() || 'this directory';
+                if (!confirm(`Remove "${label}" from this collection? Videos and watch history are unaffected.`)) return;
+                const resp = await fetch(
+                    `/api/collections/${encodeURIComponent(cid)}/directories/${encodeURIComponent(did)}`,
+                    { method: 'DELETE' },
+                );
+                if (!resp.ok) {
+                    alert('Remove failed');
+                    return;
+                }
+                window.location.reload();
+            });
+        });
+
+        // Populate the "Add directory" <select> with eligible directories.
+        const select = document.getElementById('add-directory-select');
+        if (select) {
+            const includedIds = new Set(
+                Array.from(dirRow.querySelectorAll('.coll-dir-chip'))
+                    .map(c => c.dataset.directoryId),
+            );
+            fetch('/api/directories').then(async resp => {
+                if (!resp.ok) return;
+                const all = await resp.json();
+                for (const d of all) {
+                    if (d.removed) continue;
+                    if (includedIds.has(String(d.id))) continue;
+                    const opt = document.createElement('option');
+                    opt.value = String(d.id);
+                    opt.textContent = d.label;
+                    select.appendChild(opt);
+                }
+            });
+            select.addEventListener('change', async () => {
+                const did = select.value;
+                if (!did) return;
+                select.disabled = true;
+                const resp = await fetch(
+                    `/api/collections/${encodeURIComponent(cid)}/directories`,
+                    {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify({ directory_id: parseInt(did, 10) }),
+                    },
+                );
+                select.disabled = false;
+                if (!resp.ok) {
+                    alert('Add failed');
+                    select.value = '';
+                    return;
+                }
+                window.location.reload();
+            });
+        }
+    }
 })();

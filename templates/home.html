@@ -36,6 +36,26 @@
     </button>
   </div>
 </section>
+
+<section class="card" id="new-collection-modal" hidden>
+  <h2>New Collection</h2>
+  <p class="muted">
+    A custom collection is the union of the directories you include. It
+    updates automatically as those directories change.
+  </p>
+  <div class="row">
+    <input type="text" id="new-collection-name" class="grow" placeholder="Collection name">
+  </div>
+  <p class="muted" id="new-collection-dirs-empty" hidden>
+    No directories available. <a href="/settings">Add one in Settings</a> first.
+  </p>
+  <ul class="picker-entries" id="new-collection-dirs"></ul>
+  <div class="row">
+    <button type="button" class="primary" id="new-collection-create">Create</button>
+    <button type="button" id="new-collection-cancel">Cancel</button>
+  </div>
+  <p class="muted" id="new-collection-status"></p>
+</section>
 {% endblock %}
 
 {% block scripts %}

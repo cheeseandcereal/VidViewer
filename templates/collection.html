@@ -27,6 +27,28 @@
   </div>
 </header>
 
+{% match collection.kind %}
+  {% when crate::collections::Kind::Custom %}
+    <section class="chip-row coll-dirs" data-collection-id="{{ collection.id }}">
+      {% for d in member_directories %}
+        <span class="chip coll-dir-chip{% if d.removed %} removed{% endif %}"
+              data-directory-id="{{ d.directory_id }}"
+              title="{{ d.path }}">
+          <a href="/collections/{{ collection.id }}"
+             class="chip-label"
+             data-directory-label>{{ d.label }}</a>
+          <button type="button" class="chip-remove" aria-label="Remove directory from collection">×</button>
+        </span>
+      {% endfor %}
+      <span class="chip add-chip">
+        <select id="add-directory-select" aria-label="Directory to add">
+          <option value="">+ Add directory…</option>
+        </select>
+      </span>
+    </section>
+  {% when crate::collections::Kind::Directory %}
+{% endmatch %}
+
 {% if videos.is_empty() %}
 <section class="placeholder">
   <h2>No videos yet</h2>
@@ -36,7 +58,11 @@
         The scanner hasn't found anything here yet. Check
         <a href="/settings">Settings</a> to trigger a rescan.
       {% when crate::collections::Kind::Custom %}
-        This collection is empty. Add videos from any video detail page.
+        {% if member_directories.is_empty() %}
+          Add a directory above to populate this collection.
+        {% else %}
+          The directories in this collection don't contain any playable videos yet.
+        {% endif %}
     {% endmatch %}
   </p>
 </section>

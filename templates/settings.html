@@ -70,9 +70,10 @@
   <div class="remove-option">
     <h3>Soft remove</h3>
     <p class="muted">
-      Hide from the UI. Watch history, custom collection memberships, and cached
-      thumbnails are preserved. You can re-add this directory later without losing
-      progress; cached thumbnails are reused if the source files haven't changed.
+      Hide from the UI. Watch history, any custom collection references to
+      this directory, and cached thumbnails are preserved. You can re-add this
+      directory later without losing progress; cached thumbnails are reused if
+      the source files haven't changed.
     </p>
     <button type="button" class="primary" id="btn-remove-soft">Soft remove</button>
   </div>
@@ -80,9 +81,10 @@
   <div class="remove-option">
     <h3>Permanently delete</h3>
     <p class="muted">
-      Delete the directory and all of its videos from the database. Watch history,
-      custom collection memberships, and cached thumbnails and previews for these
-      videos will be removed. This cannot be undone.
+      Delete the directory and all of its videos from the database. Watch
+      history and cached thumbnails and previews for these videos will be
+      removed, and any custom collection that referenced this directory will
+      lose the reference. This cannot be undone.
     </p>
     <button type="button" class="danger" id="btn-remove-hard">Permanently delete</button>
   </div>

@@ -1,13 +1,10 @@
-// Video detail page. Play / Resume / Re-roll / Add-to-collection.
-//
-// Actual mpv launching is wired in step 12 via POST /api/videos/:id/play.
+// Video detail page. Play / Resume / Re-roll.
 
 (() => {
     const d = window.VIDEO_DETAIL || {};
     const playBtn = document.getElementById('btn-play');
     const resumeBtn = document.getElementById('btn-resume');
     const rerollBtn = document.getElementById('btn-reroll');
-    const addToBtn = document.getElementById('btn-add-to');
 
     async function play(startSecs) {
         if (!d.video_id) return;
@@ -37,33 +34,9 @@
         window.location.href = `/videos/${encodeURIComponent(video_id)}?cid=${encodeURIComponent(d.from_cid)}`;
     }
 
-    async function addToCollection() {
-        const resp = await fetch('/api/collections?kind=custom');
-        if (!resp.ok) { alert('Could not list collections'); return; }
-        const custom = await resp.json();
-        if (!custom.length) {
-            alert('No custom collections yet. Create one on the Home page.');
-            return;
-        }
-        const names = custom.map((c, i) => `${i + 1}. ${c.name}`).join('\n');
-        const answer = prompt('Add to which collection?\n\n' + names + '\n\nEnter a number:');
-        if (!answer) return;
-        const idx = parseInt(answer, 10) - 1;
-        const target = custom[idx];
-        if (!target) { alert('Invalid selection'); return; }
-        const addResp = await fetch(`/api/collections/${encodeURIComponent(target.id)}/videos`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ video_id: d.video_id }),
-        });
-        if (!addResp.ok) { alert('Add failed'); return; }
-        alert(`Added to "${target.name}"`);
-    }
-
     if (playBtn) playBtn.addEventListener('click', () => play(0));
     if (resumeBtn) resumeBtn.addEventListener('click', () => play(d.resume_secs || 0));
     if (rerollBtn) rerollBtn.addEventListener('click', reroll);
-    if (addToBtn) addToBtn.addEventListener('click', addToCollection);
 
     document.addEventListener('keydown', ev => {
         if (ev.defaultPrevented) return;
