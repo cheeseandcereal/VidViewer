@@ -7,18 +7,17 @@
 //     <img class="poster" src="/thumbs/<id>.jpg?v=...">
 //   </div>
 //
-// The JS attaches to any element with the `hover-scrub` class, parses its VTT on first
-// mouseenter, and sets `background-image` + `background-position` on the poster image
-// as the mouse moves. On mouseleave, the background is cleared so the poster shows.
+// The JS attaches to any element with the `hover-scrub` class, parses its VTT on
+// first mouseenter, and swaps the poster image for the preview sheet, positioning
+// it as a CSS sprite so the correct tile fills the container at any size.
 
 (() => {
-    const parsedCache = new Map(); // video_id -> { image, cues }
+    const parsedCache = new Map(); // video_id -> { cues, sheetUrl, cols, rows }
 
     function parseVtt(text) {
         const lines = text.split(/\r?\n/);
         const cues = [];
         let i = 0;
-        // Skip WEBVTT header.
         while (i < lines.length && !lines[i].includes('-->')) i++;
         while (i < lines.length) {
             const arrow = lines[i];
@@ -27,7 +26,6 @@
             const start = parseTime(startStr);
             const end = parseTime(endStr);
             i++;
-            // Next non-empty line: the image reference.
             let ref = '';
             while (i < lines.length && lines[i].trim()) {
                 ref = lines[i].trim();
@@ -49,15 +47,27 @@
     }
 
     function parseTime(s) {
-        // Accept HH:MM:SS.mmm or MM:SS.mmm
         const parts = s.split(':').map(Number);
-        if (parts.length === 3) {
-            return parts[0] * 3600 + parts[1] * 60 + parts[2];
-        }
-        if (parts.length === 2) {
-            return parts[0] * 60 + parts[1];
-        }
+        if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+        if (parts.length === 2) return parts[0] * 60 + parts[1];
         return Number(s) || 0;
+    }
+
+    // Derive the sprite grid layout (cols, rows, tile dimensions) from the cue set.
+    function computeGrid(cues) {
+        let tileW = 0;
+        let tileH = 0;
+        let maxX = 0;
+        let maxY = 0;
+        for (const c of cues) {
+            if (c.w > tileW) tileW = c.w;
+            if (c.h > tileH) tileH = c.h;
+            if (c.x > maxX) maxX = c.x;
+            if (c.y > maxY) maxY = c.y;
+        }
+        const cols = tileW > 0 ? Math.floor(maxX / tileW) + 1 : 1;
+        const rows = tileH > 0 ? Math.floor(maxY / tileH) + 1 : 1;
+        return { cols, rows, tileW, tileH };
     }
 
     async function loadCues(videoId, cacheBust) {
@@ -68,13 +78,20 @@
         const text = await resp.text();
         const cues = parseVtt(text);
         if (cues.length === 0) return null;
-        const data = { cues, sheetUrl: cues[0].url };
+        const grid = computeGrid(cues);
+        const data = {
+            cues,
+            sheetUrl: cues[0].url,
+            cols: grid.cols,
+            rows: grid.rows,
+            tileW: grid.tileW,
+            tileH: grid.tileH,
+        };
         parsedCache.set(videoId, data);
         return data;
     }
 
     function findCueAt(cues, t) {
-        // Linear scan is fine for <= ~100 cues.
         for (const c of cues) {
             if (t >= c.start && t < c.end) return c;
         }
@@ -89,15 +106,11 @@
         if (!videoId || !previewOk || !duration) return;
 
         const poster = el.querySelector('img, .poster');
-        if (!poster) return;
 
         let cuesData = null;
-        let origSrc = null;
 
         el.addEventListener('mouseenter', async () => {
             if (!cuesData) cuesData = await loadCues(videoId, cacheBust);
-            if (!cuesData) return;
-            origSrc = origSrc || poster.getAttribute('src') || '';
         });
 
         el.addEventListener('mousemove', ev => {
@@ -108,26 +121,30 @@
             const c = findCueAt(cuesData.cues, t);
             if (!c) return;
 
-            // Apply the sprite as a background on the poster element, hiding its src image.
-            poster.style.backgroundImage = `url("${c.url}")`;
-            poster.style.backgroundPosition = `-${c.x}px -${c.y}px`;
-            poster.style.backgroundSize = 'auto';
-            poster.style.backgroundRepeat = 'no-repeat';
-            poster.style.width = `${c.w}px`;
-            poster.style.height = `${c.h}px`;
-            // Hide the <img>'s own content by clearing its src temporarily.
-            if (poster.tagName === 'IMG') {
-                poster.setAttribute('src', '');
-            }
+            const { cols, rows, tileW, tileH } = cuesData;
+            const col = tileW > 0 ? Math.round(c.x / tileW) : 0;
+            const row = tileH > 0 ? Math.round(c.y / tileH) : 0;
+
+            // CSS-sprite percentage layout: scale the background to be `cols x rows`
+            // container-sizes large, then position the sheet so the requested tile
+            // is what shows through the container. Paint it on the container itself
+            // (over the poster image, which stays as the fallback underneath).
+            el.style.backgroundImage = `url("${c.url}")`;
+            el.style.backgroundSize = `${cols * 100}% ${rows * 100}%`;
+            const bgX = cols > 1 ? (col / (cols - 1)) * 100 : 0;
+            const bgY = rows > 1 ? (row / (rows - 1)) * 100 : 0;
+            el.style.backgroundPosition = `${bgX}% ${bgY}%`;
+            el.style.backgroundRepeat = 'no-repeat';
+
+            if (poster) poster.style.opacity = '0';
         });
 
         el.addEventListener('mouseleave', () => {
-            poster.style.backgroundImage = '';
-            poster.style.width = '';
-            poster.style.height = '';
-            if (poster.tagName === 'IMG' && origSrc) {
-                poster.setAttribute('src', origSrc);
-            }
+            el.style.backgroundImage = '';
+            el.style.backgroundSize = '';
+            el.style.backgroundPosition = '';
+            el.style.backgroundRepeat = '';
+            if (poster) poster.style.opacity = '';
         });
     }
 

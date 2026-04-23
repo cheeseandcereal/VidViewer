@@ -36,8 +36,8 @@ A single Rust process runs:
 - **HTTP server** (`axum` + `tower-http`) handling pages and API.
 - **Scanner** as a `tokio` task; triggered at startup and on demand.
 - **Job workers**:
-  - General lane (default concurrency 5): `probe`, `thumbnail`.
-  - Preview lane (default concurrency 3): `preview`.
+  - General lane (default concurrency 10): `probe`, `thumbnail`.
+  - Preview lane (default concurrency 8): `preview`.
 - **Player sessions**: one `tokio` task per active `mpv` IPC socket.
 
 All share a single `SqlitePool` and a single `AppState` value.

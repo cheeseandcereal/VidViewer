@@ -6,7 +6,7 @@ Job kinds are the discrete background work units tracked in the `jobs` table. To
 
 1. **Pick a name.** Must be a lowercase ASCII string, e.g. `waveform`. Add it to the allowed
    set in `docs/design/05-jobs-and-workers.md` and to whatever enum backs `jobs.kind` in code.
-2. **Decide its lane.** General lane (concurrency 5) or preview lane (concurrency 3)? If it
+2. **Decide its lane.** General lane (concurrency 10) or preview lane (concurrency 8)? If it
    could starve other jobs, give it its own lane.
 3. **Implement it.**
    - Add a module `src/jobs/<kind>.rs`.

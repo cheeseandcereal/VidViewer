@@ -47,7 +47,7 @@ Grid dimensions are auto-computed: `cols = ceil(sqrt(count))`, `rows = ceil(coun
 Defaults:
 
 - `preview_min_interval = 2` seconds.
-- `preview_target_count = 100`.
+- `preview_target_count = 56`.
 
 ### Generation
 
