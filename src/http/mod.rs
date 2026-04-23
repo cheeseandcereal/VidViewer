@@ -20,8 +20,8 @@ pub async fn serve(state: AppState) -> Result<()> {
 
     // Make sure cache dirs exist so ServeDir doesn't 404 due to missing directory.
     for p in [
-        crate::config::thumb_cache_dir(),
-        crate::config::preview_cache_dir(),
+        state.config.thumb_cache_dir(),
+        state.config.preview_cache_dir(),
     ] {
         if let Err(err) = tokio::fs::create_dir_all(&p).await {
             tracing::warn!(path = %p.display(), error = %err, "could not create cache dir");
@@ -59,6 +59,8 @@ pub async fn serve(state: AppState) -> Result<()> {
         thumbnail_width: state.config.thumbnail_width,
         preview_min_interval: state.config.preview_min_interval,
         preview_target_count: state.config.preview_target_count,
+        thumb_dir: state.config.thumb_cache_dir(),
+        preview_dir: state.config.preview_cache_dir(),
     };
     let _worker_handles = workers.spawn_all(
         state.config.worker_concurrency,
@@ -91,8 +93,8 @@ pub async fn serve(state: AppState) -> Result<()> {
 
 pub(crate) fn router(state: AppState) -> Router {
     let static_dir = ServeDir::new("static");
-    let thumbs_dir = ServeDir::new(crate::config::thumb_cache_dir());
-    let previews_dir = ServeDir::new(crate::config::preview_cache_dir());
+    let thumbs_dir = ServeDir::new(state.config.thumb_cache_dir());
+    let previews_dir = ServeDir::new(state.config.preview_cache_dir());
 
     Router::new()
         .route("/healthz", axum::routing::get(healthz))
@@ -203,6 +205,7 @@ mod tests {
     pub(crate) async fn test_state() -> AppState {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config {
+            data_dir: tmp.path().to_path_buf(),
             backup_dir: tmp.path().join("backups"),
             ..crate::config::Config::default()
         };

@@ -244,9 +244,9 @@ pub async fn settings(State(state): State<AppState>) -> Response {
         directories: dirs,
         port: state.config.port,
         player: state.config.player.clone(),
-        db_path: crate::config::database_path().display().to_string(),
-        thumb_dir: crate::config::thumb_cache_dir().display().to_string(),
-        preview_dir: crate::config::preview_cache_dir().display().to_string(),
+        db_path: state.config.database_path().display().to_string(),
+        thumb_dir: state.config.thumb_cache_dir().display().to_string(),
+        preview_dir: state.config.preview_cache_dir().display().to_string(),
     })
 }
 

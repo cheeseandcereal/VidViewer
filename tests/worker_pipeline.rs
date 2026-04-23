@@ -16,20 +16,21 @@ use vidviewer::{
     video_tool::{MockVideoTool, ProbeResult, VideoToolRef},
 };
 
-async fn setup() -> (TempDir, sqlx::SqlitePool, ClockRef, PathBuf) {
+async fn setup() -> (TempDir, sqlx::SqlitePool, ClockRef, Config) {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = Config {
+        data_dir: tmp.path().to_path_buf(),
         backup_dir: tmp.path().join("backups"),
         ..Config::default()
     };
-    let db_path = tmp.path().join("vidviewer.db");
+    let db_path = cfg.database_path();
     let pool = db::init(&cfg, &db_path).await.unwrap();
-    (tmp, pool, clock::system(), db_path)
+    (tmp, pool, clock::system(), cfg)
 }
 
 #[tokio::test]
 async fn probe_enqueues_thumbnail_and_preview() {
-    let (tmp, pool, clock, _db) = setup().await;
+    let (tmp, pool, clock, cfg) = setup().await;
 
     // Create a dummy video file + directory.
     let videos = tmp.path().join("videos");
@@ -60,6 +61,8 @@ async fn probe_enqueues_thumbnail_and_preview() {
         thumbnail_width: 320,
         preview_min_interval: 2.0,
         preview_target_count: 100,
+        thumb_dir: cfg.thumb_cache_dir(),
+        preview_dir: cfg.preview_cache_dir(),
     };
     let _handles = workers.spawn_all(1, 1);
 
@@ -103,4 +106,23 @@ async fn probe_enqueues_thumbnail_and_preview() {
     assert_eq!(width, Some(1280));
     assert_eq!(thumbnail_ok, 1);
     assert_eq!(preview_ok, 1);
+
+    // Mock writes must have gone to the tempdir, not the user's real cache.
+    let thumb = cfg.thumb_cache_dir();
+    assert!(thumb.starts_with(tmp.path()));
+    assert!(
+        thumb.exists(),
+        "thumb cache dir wasn't created under tempdir"
+    );
+    let preview = cfg.preview_cache_dir();
+    assert!(preview.starts_with(tmp.path()));
+    assert!(
+        preview.exists(),
+        "preview cache dir wasn't created under tempdir"
+    );
 }
+
+// The `tmp` argument is kept alive until the end of the test, which keeps the DB
+// file (and all cache outputs) on disk long enough for the assertions above.
+#[allow(dead_code)]
+fn _keep_tmp_alive(_t: &TempDir, _pb: PathBuf) {}

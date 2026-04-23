@@ -206,9 +206,10 @@ async fn integrity_check(pool: &SqlitePool) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn test_config(backup_dir: &Path) -> Config {
+    fn test_config(data_dir: &Path) -> Config {
         Config {
-            backup_dir: backup_dir.to_path_buf(),
+            data_dir: data_dir.to_path_buf(),
+            backup_dir: data_dir.join("backups"),
             ..Config::default()
         }
     }
@@ -217,7 +218,7 @@ mod tests {
     async fn fresh_db_initializes_and_has_all_tables() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("data").join("vidviewer.db");
-        let cfg = test_config(&tmp.path().join("backups"));
+        let cfg = test_config(tmp.path());
 
         let pool = init(&cfg, &db_path).await.unwrap();
         integrity_check(&pool).await.unwrap();
@@ -235,7 +236,7 @@ mod tests {
     async fn ui_state_row_exists() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("data").join("vidviewer.db");
-        let cfg = test_config(&tmp.path().join("backups"));
+        let cfg = test_config(tmp.path());
         let pool = init(&cfg, &db_path).await.unwrap();
 
         let row = sqlx::query("SELECT last_browsed_path FROM ui_state WHERE id=1")
@@ -250,8 +251,8 @@ mod tests {
     async fn second_init_does_not_backup() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("data").join("vidviewer.db");
-        let backups = tmp.path().join("backups");
-        let cfg = test_config(&backups);
+        let cfg = test_config(tmp.path());
+        let backups = cfg.backup_dir.clone();
         {
             let _ = init(&cfg, &db_path).await.unwrap();
         }

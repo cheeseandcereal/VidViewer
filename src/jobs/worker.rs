@@ -28,6 +28,8 @@ pub struct Workers {
     pub thumbnail_width: u32,
     pub preview_min_interval: f64,
     pub preview_target_count: u32,
+    pub thumb_dir: PathBuf,
+    pub preview_dir: PathBuf,
 }
 
 impl Workers {
@@ -214,7 +216,7 @@ impl Workers {
             Some(d) if d > 0.0 => d * 0.5,
             _ => 5.0,
         };
-        let dst = crate::config::thumb_cache_dir().join(format!("{}.jpg", video_id.as_str()));
+        let dst = self.thumb_dir.join(format!("{}.jpg", video_id.as_str()));
         info!(
             video_id = %video_id,
             path = %abs_path.display(),
@@ -251,7 +253,7 @@ impl Workers {
             return Err(anyhow!("plan generation returned None despite duration"));
         };
 
-        let preview_dir = crate::config::preview_cache_dir();
+        let preview_dir = self.preview_dir.clone();
         let sheet_path = preview_dir.join(format!("{}.jpg", video_id.as_str()));
         let vtt_path = preview_dir.join(format!("{}.vtt", video_id.as_str()));
 

@@ -80,7 +80,7 @@ pub async fn run_cli(cli: Cli) -> Result<()> {
 
     match cli.command {
         None => {
-            let db_path = crate::config::database_path();
+            let db_path = cfg.database_path();
             let pool = crate::db::init(&cfg, &db_path).await?;
             let state = crate::state::AppState::new(cfg, pool);
             crate::http::serve(state).await
@@ -122,11 +122,11 @@ async fn doctor(cfg: &crate::config::Config) -> Result<()> {
         }
     }
 
-    let db_path = config::database_path();
+    let db_path = cfg.database_path();
     tracing::info!(path = %db_path.display(), "database path");
     for (label, path) in [
-        ("thumb cache", config::thumb_cache_dir()),
-        ("preview cache", config::preview_cache_dir()),
+        ("thumb cache", cfg.thumb_cache_dir()),
+        ("preview cache", cfg.preview_cache_dir()),
     ] {
         match std::fs::create_dir_all(&path) {
             Ok(()) => tracing::info!(path = %path.display(), "{label} writable"),
@@ -153,7 +153,7 @@ async fn doctor(cfg: &crate::config::Config) -> Result<()> {
 }
 
 async fn scan(cfg: &crate::config::Config, dry_run: bool, dir_id: Option<i64>) -> Result<()> {
-    let db_path = crate::config::database_path();
+    let db_path = cfg.database_path();
     let pool = crate::db::init(cfg, &db_path).await?;
     let clock = crate::clock::system();
     let only = dir_id.map(crate::ids::DirectoryId);

@@ -165,6 +165,7 @@ mod tests {
     async fn setup() -> (tempfile::TempDir, SqlitePool, ClockRef) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config {
+            data_dir: tmp.path().to_path_buf(),
             backup_dir: tmp.path().join("backups"),
             ..crate::config::Config::default()
         };

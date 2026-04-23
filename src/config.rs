@@ -32,11 +32,17 @@ pub struct Config {
     pub backup_before_migration: bool,
     pub backup_dir: PathBuf,
 
+    /// Root for runtime data: database file plus `cache/thumbs` and `cache/previews`.
+    /// Defaults to `~/.local/share/vidviewer`. Tests override this to point at a tempdir
+    /// so unit and integration tests do not touch the user's real cache.
+    pub data_dir: PathBuf,
+
     pub enable_debug_endpoint: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
+        let data_dir = default_data_dir();
         Self {
             port: 7878,
             player: "mpv".into(),
@@ -48,18 +54,30 @@ impl Default for Config {
             preview_concurrency: 3,
             scan_on_startup: true,
             backup_before_migration: true,
-            backup_dir: default_backup_dir(),
+            backup_dir: data_dir.join("backups"),
+            data_dir,
             enable_debug_endpoint: false,
         }
     }
 }
 
-fn default_backup_dir() -> PathBuf {
-    data_dir().join("backups")
+impl Config {
+    /// Database file path.
+    pub fn database_path(&self) -> PathBuf {
+        self.data_dir.join("vidviewer.db")
+    }
+    /// Thumbnail cache directory.
+    pub fn thumb_cache_dir(&self) -> PathBuf {
+        self.data_dir.join("cache").join("thumbs")
+    }
+    /// Preview cache directory.
+    pub fn preview_cache_dir(&self) -> PathBuf {
+        self.data_dir.join("cache").join("previews")
+    }
 }
 
 /// `~/.local/share/vidviewer`.
-pub fn data_dir() -> PathBuf {
+pub fn default_data_dir() -> PathBuf {
     if let Some(d) = dirs::data_local_dir() {
         d.join("vidviewer")
     } else {
@@ -79,21 +97,6 @@ pub fn config_dir() -> PathBuf {
 /// The default `config.toml` path.
 pub fn default_config_path() -> PathBuf {
     config_dir().join("config.toml")
-}
-
-/// Database file path. Not configurable in v1.
-pub fn database_path() -> PathBuf {
-    data_dir().join("vidviewer.db")
-}
-
-/// Thumbnail cache directory. Not configurable in v1.
-pub fn thumb_cache_dir() -> PathBuf {
-    data_dir().join("cache").join("thumbs")
-}
-
-/// Preview cache directory. Not configurable in v1.
-pub fn preview_cache_dir() -> PathBuf {
-    data_dir().join("cache").join("previews")
 }
 
 /// Load config from `path`. If the file does not exist, write a default and return it.
@@ -156,5 +159,25 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         let expanded = expand_tilde(Path::new("~/stuff"));
         assert_eq!(expanded, home.join("stuff"));
+    }
+
+    #[test]
+    fn cache_dirs_derive_from_data_dir() {
+        let cfg = Config {
+            data_dir: PathBuf::from("/tmp/vvtest"),
+            ..Config::default()
+        };
+        assert_eq!(
+            cfg.thumb_cache_dir(),
+            PathBuf::from("/tmp/vvtest/cache/thumbs")
+        );
+        assert_eq!(
+            cfg.preview_cache_dir(),
+            PathBuf::from("/tmp/vvtest/cache/previews")
+        );
+        assert_eq!(
+            cfg.database_path(),
+            PathBuf::from("/tmp/vvtest/vidviewer.db")
+        );
     }
 }
