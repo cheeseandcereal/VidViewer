@@ -17,6 +17,30 @@ pub mod pages;
 pub async fn serve(state: AppState) -> Result<()> {
     let port = state.config.port;
 
+    // Make sure cache dirs exist so ServeDir doesn't 404 due to missing directory.
+    for p in [
+        crate::config::thumb_cache_dir(),
+        crate::config::preview_cache_dir(),
+    ] {
+        if let Err(err) = tokio::fs::create_dir_all(&p).await {
+            tracing::warn!(path = %p.display(), error = %err, "could not create cache dir");
+        }
+    }
+
+    // Spawn background job workers.
+    let workers = crate::jobs::worker::Workers {
+        pool: state.pool.clone(),
+        clock: state.clock.clone(),
+        video_tool: state.video_tool.clone(),
+        thumbnail_width: state.config.thumbnail_width,
+        preview_min_interval: state.config.preview_min_interval,
+        preview_target_count: state.config.preview_target_count,
+    };
+    let _worker_handles = workers.spawn_all(
+        state.config.worker_concurrency,
+        state.config.preview_concurrency,
+    );
+
     // Kick off an initial scan in the background if configured.
     if state.config.scan_on_startup {
         let handle = crate::scanner::spawn_all(state.pool.clone(), state.clock.clone());
@@ -42,6 +66,8 @@ pub async fn serve(state: AppState) -> Result<()> {
 
 pub(crate) fn router(state: AppState) -> Router {
     let static_dir = ServeDir::new("static");
+    let thumbs_dir = ServeDir::new(crate::config::thumb_cache_dir());
+    let previews_dir = ServeDir::new(crate::config::preview_cache_dir());
 
     Router::new()
         .route("/healthz", axum::routing::get(healthz))
@@ -83,6 +109,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/scan", axum::routing::post(api::start_scan))
         .route("/api/scan/status", axum::routing::get(api::scan_status))
         .nest_service("/static", static_dir)
+        .nest_service("/thumbs", thumbs_dir)
+        .nest_service("/previews", previews_dir)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

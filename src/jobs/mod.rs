@@ -8,6 +8,9 @@ use sqlx::{Row, SqliteConnection, SqlitePool};
 
 use crate::ids::VideoId;
 
+pub mod preview_plan;
+pub mod worker;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Probe,
