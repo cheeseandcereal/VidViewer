@@ -25,6 +25,12 @@ pub struct Video {
     pub thumbnail_ok: bool,
     pub preview_ok: bool,
     pub missing: bool,
+    pub is_audio_only: bool,
+    /// Zero-based index of a still-image stream (typically embedded cover
+    /// art) inside the container, or None if there isn't one. Populated at
+    /// probe time; used by the thumbnail job to extract cover art for
+    /// audio-only files.
+    pub attached_pic_stream_index: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -136,7 +142,7 @@ pub async fn get_detail(pool: &SqlitePool, id: &VideoId) -> Result<Option<VideoD
 
 const SELECT_ALL: &str = "SELECT id, directory_id, relative_path, filename, size_bytes, \
     mtime_unix, duration_secs, width, height, codec, thumbnail_ok, preview_ok, missing, \
-    created_at, updated_at FROM videos WHERE id = ?";
+    is_audio_only, attached_pic_stream_index, created_at, updated_at FROM videos WHERE id = ?";
 
 pub fn row_to_video(row: &sqlx::sqlite::SqliteRow) -> Result<Video> {
     let id: String = row.get("id");
@@ -149,6 +155,7 @@ pub fn row_to_video(row: &sqlx::sqlite::SqliteRow) -> Result<Video> {
     let width: Option<i64> = row.get("width");
     let height: Option<i64> = row.get("height");
     let codec: Option<String> = row.get("codec");
+    let attached_pic_stream_index: Option<i64> = row.get("attached_pic_stream_index");
     Ok(Video {
         id: VideoId(id),
         directory_id: DirectoryId(directory_id),
@@ -163,6 +170,8 @@ pub fn row_to_video(row: &sqlx::sqlite::SqliteRow) -> Result<Video> {
         thumbnail_ok: bool_from_i64(row, "thumbnail_ok"),
         preview_ok: bool_from_i64(row, "preview_ok"),
         missing: bool_from_i64(row, "missing"),
+        is_audio_only: bool_from_i64(row, "is_audio_only"),
+        attached_pic_stream_index,
         created_at: datetime_from_rfc3339(row, "created_at")?,
         updated_at: datetime_from_rfc3339(row, "updated_at")?,
     })

@@ -37,6 +37,8 @@ CREATE TABLE videos (
     thumbnail_ok   INTEGER NOT NULL DEFAULT 0 CHECK (thumbnail_ok IN (0, 1)),
     preview_ok     INTEGER NOT NULL DEFAULT 0 CHECK (preview_ok IN (0, 1)),
     missing        INTEGER NOT NULL DEFAULT 0 CHECK (missing IN (0, 1)),
+    is_audio_only  INTEGER NOT NULL DEFAULT 0 CHECK (is_audio_only IN (0, 1)),
+    attached_pic_stream_index INTEGER,
     created_at     TEXT    NOT NULL,
     updated_at     TEXT    NOT NULL,
     UNIQUE(directory_id, relative_path)
@@ -44,6 +46,14 @@ CREATE TABLE videos (
 CREATE INDEX idx_videos_updated_at ON videos(updated_at);
 CREATE INDEX idx_videos_missing    ON videos(missing);
 ```
+
+`is_audio_only = 1` means the file has no real video stream (either it's a
+pure audio container, or it's a video container carrying only audio plus an
+optional still-image attached-pic). Set at probe time by ffprobe classification.
+`attached_pic_stream_index`, when non-NULL, is the zero-based index of a
+still-image stream (typically embedded cover art) that the thumbnail job can
+extract as the poster image. Both columns are added by
+[`migrations/0002_audio_support.sql`](../../migrations/0002_audio_support.sql).
 
 ### `collections`
 
