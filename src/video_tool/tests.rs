@@ -71,12 +71,17 @@ fn single_frame_command_uses_input_side_seek() {
 
     // `-update 1` must be present so newer ffmpeg (Lavf 62+) accepts a
     // single-image output file name instead of demanding an image-sequence
-    // pattern.
+    // pattern. It must sit AFTER -i (it's an output option, not a global
+    // one; newer ffmpeg rejects it with exit status 8 if placed globally).
     let update_pos = args
         .iter()
         .position(|a| a.to_string_lossy() == "-update")
         .expect("missing -update");
     assert_eq!(args[update_pos + 1].to_string_lossy(), "1");
+    assert!(
+        update_pos > i_pos,
+        "-update must come after -i (it is an output option), got update_pos={update_pos} i_pos={i_pos}"
+    );
 }
 
 #[test]
@@ -110,6 +115,10 @@ fn tile_from_scratch_command_reads_numbered_pattern() {
         .position(|a| a.to_string_lossy() == "-update")
         .expect("missing -update");
     assert_eq!(args[update_pos + 1].to_string_lossy(), "1");
+    assert!(
+        update_pos > i_pos,
+        "-update must come after -i (it is an output option)"
+    );
 }
 
 #[test]

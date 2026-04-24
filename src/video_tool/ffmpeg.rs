@@ -282,10 +282,6 @@ async fn run_thumbnail_attempt(
     let vf = format!("scale={width}:-2");
     let mut cmd = tokio::process::Command::new("ffmpeg");
     cmd.arg("-y");
-    // `-update 1` is required by newer ffmpeg (Lavf 62+) when writing a
-    // single image with the image2 muxer; without it ffmpeg demands an
-    // image-sequence filename pattern like `out_%03d.jpg`.
-    cmd.arg("-update").arg("1");
     if let Some(idx) = stream_index {
         // Cover-art mode: pull frame 0 of the specified stream index. This
         // is how we extract embedded album art from audio files — ffprobe
@@ -302,6 +298,12 @@ async fn run_thumbnail_attempt(
     }
     cmd.arg("-frames:v").arg("1");
     cmd.arg("-vf").arg(&vf);
+    // `-update 1` must sit between the input/filter block and the output
+    // path — it's an *output* option. Placing it at the top alongside `-y`
+    // gets ffmpeg to reject it with "Option not found" (exit status 8) on
+    // newer builds. Required by Lavf 62+ to accept single-image output
+    // without an image-sequence filename pattern.
+    cmd.arg("-update").arg("1");
     cmd.arg(dst);
     let status = cmd
         .stdout(Stdio::null())
@@ -337,10 +339,6 @@ pub(super) fn build_single_frame_command(
     );
     let mut args: Vec<OsString> = Vec::with_capacity(14);
     args.push("-y".into());
-    // `-update 1` is required by newer ffmpeg (Lavf 62+) when writing a
-    // single image with the image2 muxer.
-    args.push("-update".into());
-    args.push("1".into());
     args.push("-ss".into());
     args.push(format!("{t_secs:.6}").into());
     args.push("-i".into());
@@ -349,6 +347,11 @@ pub(super) fn build_single_frame_command(
     args.push("1".into());
     args.push("-vf".into());
     args.push(vf.into());
+    // `-update 1` is an *output* option: it must come after the input and
+    // filter block, immediately before the output path. Required by newer
+    // ffmpeg (Lavf 62+) to accept single-image output.
+    args.push("-update".into());
+    args.push("1".into());
     args.push(dst.into());
     args
 }
@@ -366,9 +369,6 @@ pub(super) fn build_tile_from_scratch_command(
     let vf = format!("tile={cols}x{rows}");
     let args: Vec<OsString> = vec![
         "-y".into(),
-        // `-update 1` keeps newer ffmpeg happy about single-image output.
-        "-update".into(),
-        "1".into(),
         "-start_number".into(),
         "0".into(),
         "-framerate".into(),
@@ -381,6 +381,11 @@ pub(super) fn build_tile_from_scratch_command(
         count.to_string().into(),
         "-vf".into(),
         vf.into(),
+        // `-update 1` is an output option: newer ffmpeg rejects it if
+        // placed with global/input flags. Keeps single-image output
+        // accepted without an image-sequence filename pattern.
+        "-update".into(),
+        "1".into(),
         dst.into(),
     ];
     args
