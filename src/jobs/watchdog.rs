@@ -84,18 +84,26 @@ pub async fn reset_stuck_running(
 }
 
 /// Delete historical `failed` job rows whose failure mode is no longer
-/// reproducible by the current code. Specifically: `preview` and `thumbnail`
-/// jobs against `is_audio_only = 1` rows — these were logged before the
-/// audio-support commits added their gates, and the rerun behavior today
-/// would be either "skip cleanly" (preview) or "extract cover art / skip"
-/// (thumbnail). Keeping them in the DB serves no purpose.
+/// reproducible by the current code. Two categories:
 ///
-/// Genuinely-failed jobs against real video rows are left in place so they
-/// remain visible as diagnostic history.
+/// 1. `preview` and `thumbnail` jobs against `is_audio_only = 1` rows —
+///    these were logged before the audio-support commits added their
+///    gates. The rerun behavior today would be either "skip cleanly"
+///    (preview) or "extract cover art / skip" (thumbnail).
+/// 2. `preview` and `thumbnail` jobs against rows where the corresponding
+///    `*_ok` flag is now `1` — the asset was successfully regenerated on
+///    a later attempt, so the old failure is just stale noise.
+///
+/// Failed jobs against real video rows whose asset is *still* missing are
+/// left in place as diagnostic history: those are the ones a user or
+/// operator might actually want to investigate.
 ///
 /// Returns the number of rows deleted. Idempotent.
 pub async fn cleanup_obsolete_failed_jobs(pool: &SqlitePool) -> Result<u64> {
-    let affected = sqlx::query(
+    let mut deleted = 0u64;
+
+    // Audio-only rows: both preview and thumbnail failures are obsolete.
+    deleted += sqlx::query(
         "DELETE FROM jobs \
          WHERE status = 'failed' \
            AND kind IN ('preview', 'thumbnail') \
@@ -106,11 +114,36 @@ pub async fn cleanup_obsolete_failed_jobs(pool: &SqlitePool) -> Result<u64> {
     .context("deleting obsolete failed jobs for audio-only rows")?
     .rows_affected();
 
-    if affected > 0 {
+    // Real-video rows where the thumbnail has since succeeded: the old
+    // `failed thumbnail` row is just noise on the activity feed.
+    deleted += sqlx::query(
+        "DELETE FROM jobs \
+         WHERE status = 'failed' \
+           AND kind = 'thumbnail' \
+           AND video_id IN (SELECT id FROM videos WHERE thumbnail_ok = 1)",
+    )
+    .execute(pool)
+    .await
+    .context("deleting failed thumbnail jobs on videos with thumbnail_ok=1")?
+    .rows_affected();
+
+    // Same for preview.
+    deleted += sqlx::query(
+        "DELETE FROM jobs \
+         WHERE status = 'failed' \
+           AND kind = 'preview' \
+           AND video_id IN (SELECT id FROM videos WHERE preview_ok = 1)",
+    )
+    .execute(pool)
+    .await
+    .context("deleting failed preview jobs on videos with preview_ok=1")?
+    .rows_affected();
+
+    if deleted > 0 {
         tracing::info!(
-            deleted = affected,
-            "cleaned up failed preview/thumbnail jobs for audio-only rows"
+            deleted,
+            "cleaned up failed jobs whose failure mode is no longer reproducible"
         );
     }
-    Ok(affected)
+    Ok(deleted)
 }

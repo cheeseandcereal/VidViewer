@@ -625,3 +625,88 @@ async fn cleanup_obsolete_failed_jobs_leaves_non_failed_rows_alone() {
         .unwrap();
     assert_eq!(remaining, 3);
 }
+
+#[tokio::test]
+async fn cleanup_obsolete_failed_jobs_removes_recovered_video_failures() {
+    // Real video whose thumbnail_ok is 1 now (a later attempt succeeded).
+    // Any historical `failed thumbnail` row for it is just noise and
+    // should be cleaned up. Same logic for preview on preview_ok=1 rows.
+    use crate::jobs::cleanup_obsolete_failed_jobs;
+
+    let (tmp, pool) = setup().await;
+    let clock = clock::system();
+    let a = tmp.path().join("a");
+    std::fs::create_dir_all(&a).unwrap();
+    crate::test_support::write_video_fixture(&a, "recovered_thumb.mp4", b"x");
+    crate::test_support::write_video_fixture(&a, "recovered_prev.mp4", b"y");
+    crate::test_support::write_video_fixture(&a, "still_broken.mp4", b"z");
+    add_dir(&pool, &clock, &a, None).await.unwrap();
+    let cache = test_cache(tmp.path());
+    crate::scanner::scan_all(&pool, &clock, &cache)
+        .await
+        .unwrap();
+
+    // Mark the three rows: two recovered (one thumbnail, one preview),
+    // one still broken (nothing generated yet).
+    sqlx::query("UPDATE videos SET thumbnail_ok = 1 WHERE filename = 'recovered_thumb.mp4'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE videos SET preview_ok = 1 WHERE filename = 'recovered_prev.mp4'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let recovered_thumb_id: String =
+        sqlx::query_scalar("SELECT id FROM videos WHERE filename = 'recovered_thumb.mp4'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let recovered_prev_id: String =
+        sqlx::query_scalar("SELECT id FROM videos WHERE filename = 'recovered_prev.mp4'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let still_broken_id: String =
+        sqlx::query_scalar("SELECT id FROM videos WHERE filename = 'still_broken.mp4'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Seed failed rows.
+    sqlx::query("DELETE FROM jobs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let now_s = clock.now().to_rfc3339();
+    for (kind, vid) in [
+        // Should be deleted: failure superseded by a successful run.
+        ("thumbnail", &recovered_thumb_id),
+        ("preview", &recovered_prev_id),
+        // Should be kept: still broken, operator may want to investigate.
+        ("thumbnail", &still_broken_id),
+    ] {
+        sqlx::query(
+            "INSERT INTO jobs (kind, video_id, status, error, created_at, updated_at) \
+             VALUES (?, ?, 'failed', 'e', ?, ?)",
+        )
+        .bind(kind)
+        .bind(vid)
+        .bind(&now_s)
+        .bind(&now_s)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let deleted = cleanup_obsolete_failed_jobs(&pool).await.unwrap();
+    assert_eq!(deleted, 2);
+
+    let remaining: Vec<(String, String)> =
+        sqlx::query_as("SELECT kind, video_id FROM jobs ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].0, "thumbnail");
+    assert_eq!(remaining[0].1, still_broken_id);
+}
