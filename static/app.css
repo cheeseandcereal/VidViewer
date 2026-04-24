@@ -285,18 +285,35 @@ table.dirs th {
 .mosaic {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
-    aspect-ratio: 16/9;
+    /* `minmax(0, 1fr)` (rather than plain `1fr`) forbids the row tracks
+       from growing to the intrinsic size of their img children. Without
+       this a tall/portrait thumbnail would push the mosaic taller than
+       the 16:9 aspect ratio we're trying to enforce, stretching the
+       whole collection-grid row. */
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    aspect-ratio: 16 / 9;
     background: var(--bg);
+    /* A direct grid item's implicit min-size is `auto`; overriding to 0
+       lets `object-fit: cover` actually clip oversized images. */
+    min-height: 0;
 }
 .mosaic img {
     width: 100%;
     height: 100%;
     object-fit: cover;
     display: block;
+    min-width: 0;
+    min-height: 0;
 }
-.mosaic img:only-child { grid-column: span 2; grid-row: span 2; }
-.mosaic-empty { grid-column: span 2; grid-row: span 2; background: var(--surface-2); }
+.mosaic img:only-child {
+    grid-column: span 2;
+    grid-row: span 2;
+}
+.mosaic-empty {
+    grid-column: span 2;
+    grid-row: span 2;
+    background: var(--surface-2);
+}
 
 .collection-meta { padding: var(--space-2) var(--space-3); }
 .collection-name {
