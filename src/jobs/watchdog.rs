@@ -82,3 +82,35 @@ pub async fn reset_stuck_running(
     }
     Ok(affected)
 }
+
+/// Delete historical `failed` job rows whose failure mode is no longer
+/// reproducible by the current code. Specifically: `preview` and `thumbnail`
+/// jobs against `is_audio_only = 1` rows — these were logged before the
+/// audio-support commits added their gates, and the rerun behavior today
+/// would be either "skip cleanly" (preview) or "extract cover art / skip"
+/// (thumbnail). Keeping them in the DB serves no purpose.
+///
+/// Genuinely-failed jobs against real video rows are left in place so they
+/// remain visible as diagnostic history.
+///
+/// Returns the number of rows deleted. Idempotent.
+pub async fn cleanup_obsolete_failed_jobs(pool: &SqlitePool) -> Result<u64> {
+    let affected = sqlx::query(
+        "DELETE FROM jobs \
+         WHERE status = 'failed' \
+           AND kind IN ('preview', 'thumbnail') \
+           AND video_id IN (SELECT id FROM videos WHERE is_audio_only = 1)",
+    )
+    .execute(pool)
+    .await
+    .context("deleting obsolete failed jobs for audio-only rows")?
+    .rows_affected();
+
+    if affected > 0 {
+        tracing::info!(
+            deleted = affected,
+            "cleaned up failed preview/thumbnail jobs for audio-only rows"
+        );
+    }
+    Ok(affected)
+}

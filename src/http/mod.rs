@@ -37,6 +37,7 @@ pub async fn serve(state: AppState) -> Result<()> {
                 + report.dropped_removed_dir
                 + report.dropped_missing_video
                 + report.reset_running
+                + report.reprobed_stale
                 > 0
             {
                 tracing::info!(
@@ -44,6 +45,7 @@ pub async fn serve(state: AppState) -> Result<()> {
                     dropped_removed_dir = report.dropped_removed_dir,
                     dropped_missing_video = report.dropped_missing_video,
                     reset_running = report.reset_running,
+                    reprobed_stale = report.reprobed_stale,
                     "reconciled leftover jobs at startup"
                 );
             }
@@ -51,6 +53,14 @@ pub async fn serve(state: AppState) -> Result<()> {
         Err(err) => {
             tracing::error!(error = %err, "startup job reconciliation failed");
         }
+    }
+
+    // Clean up historical `failed` rows whose failure mode no longer
+    // reproduces under current code (preview/thumbnail against audio-only
+    // rows). Running at startup means a server restart is enough to clear
+    // the noise; the cleanup also fires on every manual scan.
+    if let Err(err) = crate::jobs::cleanup_obsolete_failed_jobs(&state.pool).await {
+        tracing::warn!(error = %err, "startup failed-job cleanup failed");
     }
 
     // Spawn background job workers.

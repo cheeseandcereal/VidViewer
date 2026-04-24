@@ -263,6 +263,14 @@ pub async fn start_scan(
         tracing::warn!(error = %err, "ad-hoc watchdog pass before scan failed");
     }
 
+    // Also sweep out any historical `failed` rows whose failure mode is no
+    // longer reproducible by the current code (preview/thumbnail against
+    // audio-only rows). A scan is the natural moment to tidy them up — the
+    // user has just asked for the state to be refreshed.
+    if let Err(err) = jobs::cleanup_obsolete_failed_jobs(&state.pool).await {
+        tracing::warn!(error = %err, "failed-job cleanup before scan failed");
+    }
+
     let only = q.dir_id.map(DirectoryId);
     let cache = scanner::CachePaths::from_config(&state.config);
     let handle = match only {

@@ -75,6 +75,14 @@ Separating preview generation prevents long tile-sheet encodes from starving qui
 - Heals pre-audio-support probe rows (see below).
 - Resets all remaining `running` rows back to `pending`.
 
+Immediately after reconcile, `cleanup_obsolete_failed_jobs` deletes any
+historical `failed` preview or thumbnail rows against `is_audio_only = 1`
+videos. These were logged before the audio-support gates existed and
+would never be reproduced today. Genuine failures against real video
+rows are left in place as diagnostic history. The same cleanup also
+runs on every manual `POST /api/scan` so users don't have to restart
+the server to clear the noise.
+
 ### Stale-probe sweep
 
 Rows matching the fingerprint
