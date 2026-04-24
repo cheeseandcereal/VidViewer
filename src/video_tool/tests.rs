@@ -68,6 +68,15 @@ fn single_frame_command_uses_input_side_seek() {
     let vf = args[vf_pos + 1].to_string_lossy().into_owned();
     assert!(vf.contains("scale=160:90"), "vf: {vf}");
     assert!(vf.contains("pad=160:90"), "vf: {vf}");
+
+    // `-update 1` must be present so newer ffmpeg (Lavf 62+) accepts a
+    // single-image output file name instead of demanding an image-sequence
+    // pattern.
+    let update_pos = args
+        .iter()
+        .position(|a| a.to_string_lossy() == "-update")
+        .expect("missing -update");
+    assert_eq!(args[update_pos + 1].to_string_lossy(), "1");
 }
 
 #[test]
@@ -95,6 +104,12 @@ fn tile_from_scratch_command_reads_numbered_pattern() {
         .position(|a| a.to_string_lossy() == "-vf")
         .unwrap();
     assert_eq!(args[vf_pos + 1].to_string_lossy(), "tile=5x3");
+
+    let update_pos = args
+        .iter()
+        .position(|a| a.to_string_lossy() == "-update")
+        .expect("missing -update");
+    assert_eq!(args[update_pos + 1].to_string_lossy(), "1");
 }
 
 #[test]
