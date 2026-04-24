@@ -80,7 +80,7 @@ async fn directory_remove_aborts_running_jobs() {
     // Seed a directory with one video.
     let videos = tmp.path().join("videos");
     std::fs::create_dir_all(&videos).unwrap();
-    std::fs::write(videos.join("a.mp4"), b"x").unwrap();
+    vidviewer::test_support::write_video_fixture(&videos, "a.mp4", b"x");
 
     let dir = add_dir(&pool, &clock, &videos, None).await.unwrap();
     let cache = CachePaths::from_config(&cfg);
@@ -195,7 +195,7 @@ async fn preview_loop_stops_after_cancellation() {
     // Seed a directory with one video + a probe+thumbnail+preview pipeline.
     let videos = tmp.path().join("videos");
     std::fs::create_dir_all(&videos).unwrap();
-    std::fs::write(videos.join("a.mp4"), b"x").unwrap();
+    vidviewer::test_support::write_video_fixture(&videos, "a.mp4", b"x");
 
     add_dir(&pool, &clock, &videos, None).await.unwrap();
     let cache = CachePaths::from_config(&cfg);
@@ -279,9 +279,9 @@ async fn pending_jobs_are_purged_before_running_are_cancelled() {
 
     let videos = tmp.path().join("videos");
     std::fs::create_dir_all(&videos).unwrap();
-    std::fs::write(videos.join("a.mp4"), b"x").unwrap();
-    std::fs::write(videos.join("b.mp4"), b"y").unwrap();
-    std::fs::write(videos.join("c.mp4"), b"z").unwrap();
+    vidviewer::test_support::write_video_fixture(&videos, "a.mp4", b"x");
+    vidviewer::test_support::write_video_fixture(&videos, "b.mp4", b"y");
+    vidviewer::test_support::write_video_fixture(&videos, "c.mp4", b"z");
 
     let dir = add_dir(&pool, &clock, &videos, None).await.unwrap();
     let cache = CachePaths::from_config(&cfg);

@@ -19,7 +19,7 @@ use crate::{
     db::row::bool_from_i64,
     directories,
     ids::VideoId,
-    scanner::{mutations, verify, CachePaths, ScanProgress, ScanReport, VIDEO_EXTENSIONS},
+    scanner::{mutations, sniff, verify, CachePaths, ScanProgress, ScanReport},
 };
 
 /// Existing video row projection used for diffing.
@@ -101,11 +101,6 @@ pub(super) async fn scan_one(
         if !entry.file_type().is_file() {
             continue;
         }
-        if !is_video_extension(entry.path()) {
-            continue;
-        }
-        progress.files_seen.fetch_add(1, Ordering::Relaxed);
-        report.files_seen += 1;
 
         let rel = match entry.path().strip_prefix(&root) {
             Ok(p) => crate::util::path::path_to_db_string(p),
@@ -127,6 +122,13 @@ pub(super) async fn scan_one(
 
         match entry_known {
             None => {
+                // New file — sniff its bytes to decide whether it's media.
+                if !sniff_or_warn(entry.path()) {
+                    continue;
+                }
+                progress.files_seen.fetch_add(1, Ordering::Relaxed);
+                report.files_seen += 1;
+
                 mutations::insert_new_video(pool, clock, dir, &rel, &filename, size, mtime).await?;
                 progress.new_videos.fetch_add(1, Ordering::Relaxed);
                 report.new_videos += 1;
@@ -135,7 +137,17 @@ pub(super) async fn scan_one(
                 // Skip the cache verification for them below.
             }
             Some(k) if k.size_bytes != size || k.mtime_unix != mtime => {
-                // Content changed on disk: clear flags, re-enqueue probe.
+                // Content changed on disk — re-sniff. If the replaced bytes no
+                // longer look like media (someone overwrote the file with
+                // text/etc.), put it back in `known` so the post-walk loop
+                // marks it missing.
+                if !sniff_or_warn(entry.path()) {
+                    known.insert(rel.clone(), k);
+                    continue;
+                }
+                progress.files_seen.fetch_add(1, Ordering::Relaxed);
+                report.files_seen += 1;
+
                 mutations::update_changed_video(pool, clock, dir, &k.id, size, mtime, k.missing)
                     .await?;
                 if !k.missing {
@@ -145,21 +157,26 @@ pub(super) async fn scan_one(
                 // Skip cache verification — the probe's follow-up jobs cover regen.
             }
             Some(k) if k.missing => {
-                // Un-missing without content change: preserve flags, re-insert the
-                // directory collection membership. The post-walk cache verification
-                // pass will detect any missing cache files and re-enqueue only the
-                // jobs that are actually needed.
+                // Un-missing without content change: preserve flags. No need to
+                // sniff again; the stat signature matches the row we already
+                // accepted as media once.
+                progress.files_seen.fetch_add(1, Ordering::Relaxed);
+                report.files_seen += 1;
                 mutations::un_mark_missing(pool, clock, dir, &k.id).await?;
                 surviving.push((k.id, k.thumbnail_ok, k.preview_ok, k.duration_secs));
             }
             Some(k) => {
-                // Unchanged: verify cache outputs at the end.
+                // Unchanged: verify cache outputs at the end. No sniff — stat
+                // matches the row we already decided was media.
+                progress.files_seen.fetch_add(1, Ordering::Relaxed);
+                report.files_seen += 1;
                 surviving.push((k.id, k.thumbnail_ok, k.preview_ok, k.duration_secs));
             }
         }
     }
 
-    // 3. Anything still in `known` wasn't found on disk.
+    // 3. Anything still in `known` wasn't found on disk — or was re-sniffed as
+    //    non-media after a change. Either way, flag it missing.
     for (rel, k) in known.into_iter() {
         if k.missing {
             continue;
@@ -195,15 +212,15 @@ pub(super) async fn scan_one(
     Ok(())
 }
 
-pub(super) fn is_video_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|ext| {
-            VIDEO_EXTENSIONS
-                .iter()
-                .any(|&v| v.eq_ignore_ascii_case(ext))
-        })
-        .unwrap_or(false)
+/// Sniff a file's header; log a warning and reject on I/O error.
+pub(super) fn sniff_or_warn(path: &Path) -> bool {
+    match sniff::looks_like_media(path) {
+        Ok(is_media) => is_media,
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "sniff failed");
+            false
+        }
+    }
 }
 
 pub(super) fn mtime_to_unix(meta: &std::fs::Metadata) -> i64 {

@@ -43,8 +43,8 @@ async fn reconcile_drops_jobs_for_removed_directory_and_resets_running() {
     let b = tmp.path().join("b");
     std::fs::create_dir_all(&a).unwrap();
     std::fs::create_dir_all(&b).unwrap();
-    std::fs::write(a.join("x.mp4"), b"x").unwrap();
-    std::fs::write(b.join("y.mp4"), b"y").unwrap();
+    crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
+    crate::test_support::write_video_fixture(&b, "y.mp4", b"y");
 
     let dir_a = add_dir(&pool, &clock, &a, None).await.unwrap();
     let _dir_b = add_dir(&pool, &clock, &b, None).await.unwrap();
@@ -99,7 +99,7 @@ async fn reconcile_resets_running_for_active_video() {
     let clock = clock::system();
     let a = tmp.path().join("a");
     std::fs::create_dir_all(&a).unwrap();
-    std::fs::write(a.join("x.mp4"), b"x").unwrap();
+    crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
     add_dir(&pool, &clock, &a, None).await.unwrap();
     let cache = test_cache(tmp.path());
     crate::scanner::scan_all(&pool, &clock, &cache)
@@ -123,7 +123,7 @@ async fn enqueue_is_idempotent_for_outstanding_jobs() {
     let clock = clock::system();
     let a = tmp.path().join("a");
     std::fs::create_dir_all(&a).unwrap();
-    std::fs::write(a.join("x.mp4"), b"x").unwrap();
+    crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
     add_dir(&pool, &clock, &a, None).await.unwrap();
     let cache = test_cache(tmp.path());
     crate::scanner::scan_all(&pool, &clock, &cache)
@@ -195,7 +195,7 @@ async fn watchdog_resets_stuck_running_jobs_not_tracked_by_registry() {
     let clock = clock::system();
     let a = tmp.path().join("a");
     std::fs::create_dir_all(&a).unwrap();
-    std::fs::write(a.join("x.mp4"), b"x").unwrap();
+    crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
     add_dir(&pool, &clock, &a, None).await.unwrap();
     let cache = test_cache(tmp.path());
     crate::scanner::scan_all(&pool, &clock, &cache)
@@ -229,7 +229,7 @@ async fn watchdog_leaves_live_running_jobs_alone() {
     let clock = clock::system();
     let a = tmp.path().join("a");
     std::fs::create_dir_all(&a).unwrap();
-    std::fs::write(a.join("x.mp4"), b"x").unwrap();
+    crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
     add_dir(&pool, &clock, &a, None).await.unwrap();
     let cache = test_cache(tmp.path());
     crate::scanner::scan_all(&pool, &clock, &cache)
@@ -279,7 +279,7 @@ async fn watchdog_respects_age_threshold() {
     let clock = clock::system();
     let a = tmp.path().join("a");
     std::fs::create_dir_all(&a).unwrap();
-    std::fs::write(a.join("x.mp4"), b"x").unwrap();
+    crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
     add_dir(&pool, &clock, &a, None).await.unwrap();
     let cache = test_cache(tmp.path());
     crate::scanner::scan_all(&pool, &clock, &cache)
@@ -310,7 +310,7 @@ async fn ad_hoc_reset_with_short_threshold_unsticks_jobs_quickly() {
     let clock = clock::system();
     let a = tmp.path().join("a");
     std::fs::create_dir_all(&a).unwrap();
-    std::fs::write(a.join("x.mp4"), b"x").unwrap();
+    crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
     add_dir(&pool, &clock, &a, None).await.unwrap();
     let cache = test_cache(tmp.path());
     crate::scanner::scan_all(&pool, &clock, &cache)

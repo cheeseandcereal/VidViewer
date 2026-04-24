@@ -36,7 +36,7 @@ async fn probe_enqueues_thumbnail_and_preview() {
     let videos = tmp.path().join("videos");
     std::fs::create_dir_all(&videos).unwrap();
     let video_path = videos.join("sample.mp4");
-    std::fs::write(&video_path, b"xx").unwrap();
+    vidviewer::test_support::write_video_fixture(&videos, "sample.mp4", b"xx");
 
     add_dir(&pool, &clock, &videos, None).await.unwrap();
     let cache = CachePaths::from_config(&cfg);

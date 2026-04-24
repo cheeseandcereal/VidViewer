@@ -26,6 +26,16 @@ async fn setup() -> (tempfile::TempDir, SqlitePool, ClockRef, CachePaths) {
 }
 
 fn write_video(dir: &Path, name: &str, bytes: &[u8]) {
+    // Thin wrapper around the shared test-support helper: prepends a
+    // minimal MP4 `ftyp` header so content-sniffing accepts the file as
+    // video, then appends caller-supplied filler so size can vary.
+    crate::test_support::write_video_fixture(dir, name, bytes);
+}
+
+/// Write a file whose contents are the caller-supplied bytes verbatim —
+/// used for fixtures that should NOT sniff as media (e.g. `.txt`, random
+/// blobs) so tests can verify they're skipped.
+fn write_plain(dir: &Path, name: &str, bytes: &[u8]) {
     std::fs::write(dir.join(name), bytes).unwrap();
 }
 
@@ -36,7 +46,7 @@ async fn inserts_new_videos_and_enqueues_probe() {
     std::fs::create_dir_all(&videos_dir).unwrap();
     write_video(&videos_dir, "a.mp4", b"x");
     write_video(&videos_dir, "b.mkv", b"xx");
-    write_video(&videos_dir, "not-a-video.txt", b"skip");
+    write_plain(&videos_dir, "not-a-video.txt", b"skip");
 
     add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
     let report = scan_all(&pool, &clock, &cache).await.unwrap();
@@ -78,6 +88,64 @@ async fn scan_is_not_recursive() {
         .await
         .unwrap();
     assert_eq!(filenames, vec!["top.mp4"]);
+}
+
+#[tokio::test]
+async fn extensionless_mp3_is_indexed_via_content_sniff() {
+    // File has no extension and a made-up name, but its first bytes are a
+    // valid ID3v2 header. Content sniffing should still classify it as
+    // media and index it.
+    let (tmp, pool, clock, cache) = setup().await;
+    let videos_dir = tmp.path().join("videos");
+    std::fs::create_dir_all(&videos_dir).unwrap();
+    let path = videos_dir.join("mystery_track");
+    let mut buf = Vec::new();
+    // ID3v2.4 tag header: "ID3" + version(2) + flags(1) + size(4).
+    buf.extend_from_slice(b"ID3\x04\x00\x00\x00\x00\x00\x00");
+    buf.resize(256, 0);
+    std::fs::write(&path, &buf).unwrap();
+    // Plus a text file that should not be indexed.
+    std::fs::write(videos_dir.join("readme"), b"this is not media").unwrap();
+
+    add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+    let report = scan_all(&pool, &clock, &cache).await.unwrap();
+    assert_eq!(report.new_videos, 1);
+    assert_eq!(report.files_seen, 1);
+
+    let filenames: Vec<String> = sqlx::query_scalar("SELECT filename FROM videos")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(filenames, vec!["mystery_track"]);
+}
+
+#[tokio::test]
+async fn rescan_flags_replaced_non_media_file_as_missing() {
+    // A previously-indexed media file, after a content change that turns it
+    // into non-media (e.g. truncated / overwritten with a text editor),
+    // should be flagged missing on the next rescan so watch history and
+    // custom collection references stay intact.
+    let (tmp, pool, clock, cache) = setup().await;
+    let videos_dir = tmp.path().join("videos");
+    std::fs::create_dir_all(&videos_dir).unwrap();
+    write_video(&videos_dir, "thing.mp4", b"x");
+    add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+    let _ = scan_all(&pool, &clock, &cache).await.unwrap();
+
+    // Overwrite with plain text + bump mtime.
+    let path = videos_dir.join("thing.mp4");
+    std::fs::write(&path, b"not video content anymore").unwrap();
+    let t = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+    filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(t)).unwrap();
+
+    let report = scan_all(&pool, &clock, &cache).await.unwrap();
+    assert_eq!(report.new_videos, 0);
+    assert_eq!(report.missing_videos, 1);
+    let missing: i64 = sqlx::query_scalar("SELECT missing FROM videos LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(missing, 1);
 }
 
 #[tokio::test]
@@ -130,8 +198,9 @@ async fn detects_change_and_missing() {
     add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
     let _ = scan_all(&pool, &clock, &cache).await.unwrap();
 
-    // Modify a.mp4 and delete b.mp4. Force mtime change.
-    std::fs::write(videos_dir.join("a.mp4"), b"xxxx").unwrap();
+    // Modify a.mp4 (still valid MP4 bytes but different size) and delete
+    // b.mp4. Force mtime change.
+    write_video(&videos_dir, "a.mp4", b"xxxxxxxx");
     let new_mtime = std::time::SystemTime::now();
     filetime::set_file_mtime(
         videos_dir.join("a.mp4"),

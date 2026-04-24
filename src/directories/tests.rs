@@ -97,8 +97,8 @@ async fn soft_remove_cancels_pending_jobs_but_keeps_running() {
     let (tmp, pool, clock) = setup().await;
     let videos = tmp.path().join("videos");
     std::fs::create_dir_all(&videos).unwrap();
-    std::fs::write(videos.join("a.mp4"), b"x").unwrap();
-    std::fs::write(videos.join("b.mp4"), b"y").unwrap();
+    crate::test_support::write_video_fixture(&videos, "a.mp4", b"x");
+    crate::test_support::write_video_fixture(&videos, "b.mp4", b"y");
 
     add(&pool, &clock, &videos, None).await.unwrap();
     let cache = crate::scanner::CachePaths {
@@ -147,7 +147,7 @@ async fn hard_remove_deletes_all_state() {
     let (tmp, pool, clock) = setup().await;
     let videos = tmp.path().join("videos");
     std::fs::create_dir_all(&videos).unwrap();
-    std::fs::write(videos.join("a.mp4"), b"x").unwrap();
+    crate::test_support::write_video_fixture(&videos, "a.mp4", b"x");
 
     let dir = add(&pool, &clock, &videos, Some("Mine".into()))
         .await

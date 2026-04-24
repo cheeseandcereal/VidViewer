@@ -1033,6 +1033,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "infer"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a588916bfdfd92e71cacef98a63d9b1f0d74d6599980d11894290e7ddefffcf7"
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2447,6 +2453,7 @@ dependencies = [
  "dirs",
  "filetime",
  "futures",
+ "infer",
  "mime",
  "mime_guess",
  "percent-encoding",

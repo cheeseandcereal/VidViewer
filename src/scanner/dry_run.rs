@@ -49,10 +49,18 @@ pub async fn dry_run_report(pool: &SqlitePool, only: Option<DirectoryId>) -> Res
 
         for entry in WalkDir::new(&root)
             .follow_links(true)
+            .max_depth(1)
             .into_iter()
             .filter_map(|r| r.ok())
         {
-            if !entry.file_type().is_file() || !walk::is_video_extension(entry.path()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            // Dry-run is a diagnostic tool; match the real scanner's media
+            // classification so its output is faithful. The sniff cost is
+            // fine here — dry-run is a human-triggered command, not a
+            // background pass.
+            if !walk::sniff_or_warn(entry.path()) {
                 continue;
             }
             let rel = match entry.path().strip_prefix(&root) {

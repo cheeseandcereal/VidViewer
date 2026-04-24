@@ -18,6 +18,7 @@ pub mod logging;
 pub mod player;
 pub mod scanner;
 pub mod state;
+pub mod test_support;
 pub mod ui_state;
 pub mod util;
 pub mod video_tool;

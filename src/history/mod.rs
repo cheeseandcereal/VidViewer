@@ -190,7 +190,7 @@ mod tests {
         let (tmp, pool, clock, cache) = setup().await;
         let videos_dir = tmp.path().join("videos");
         std::fs::create_dir_all(&videos_dir).unwrap();
-        std::fs::write(videos_dir.join("a.mp4"), b"x").unwrap();
+        crate::test_support::write_video_fixture(&videos_dir, "a.mp4", b"x");
 
         add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
         let _ = scanner::scan_all(&pool, &clock, &cache).await.unwrap();

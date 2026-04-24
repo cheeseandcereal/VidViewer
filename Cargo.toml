@@ -25,6 +25,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 futures = "0.3"
+infer = { version = "0.19", default-features = false }
 mime = "0.3"
 mime_guess = "2"
 percent-encoding = "2"

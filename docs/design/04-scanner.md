@@ -20,7 +20,9 @@ For each directory with `removed = 0`:
 2. Walk the directory **non-recursively** (`max_depth = 1`). Only files
    sitting directly inside the configured directory are considered; any
    subdirectory tree is ignored. A user who wants a nested folder indexed
-   adds it as its own top-level directory in Settings.
+   adds it as its own top-level directory in Settings. Each candidate file
+   is classified as media by content sniffing (see "Media detection"
+   below).
 3. For each file:
    - Stat → `(size_bytes, mtime_unix)`.
    - If `relative_path` not in map:
@@ -73,10 +75,38 @@ For each directory with `removed = 0`:
   subsequent operations use the lossy-converted path, which may not round-trip exactly.
 - In practice, >99% of real-world filenames are valid UTF-8.
 
-## Extensions recognized
+## Media detection
 
-Default list: `mp4 mkv webm mov avi m4v flv wmv mpg mpeg ts m2ts`.
-Hardcoded for v1; configurable is deferred.
+Files are classified as media by **content sniffing** (magic-byte signatures),
+not file extensions. On each new or changed file, the scanner reads the first
+4 KB (a single filesystem block on typical Linux setups) and feeds it to the
+[`infer`](https://crates.io/crates/infer) crate. A file is accepted iff
+`infer::get()` returns a type whose `matcher_type()` is `Audio` or `Video`.
+
+This means:
+
+- Files without a recognized extension (e.g. `song`, `movie.bin`) are
+  indexed if their bytes match a known media container.
+- Files with a media-ish extension but non-media contents (a `.mp4` that's
+  really a truncated download, a `.mkv` filled with text) are correctly
+  rejected.
+- The "what counts as media" list lives in the `infer` crate rather than in
+  this codebase. New container formats come in with upstream updates.
+
+The sniff only runs on **new files and files with a changed `(size, mtime)`
+signature**. Unchanged files skip sniffing on every rescan — we already
+decided they were media the first time we accepted them. This preserves the
+fast no-op-rescan property.
+
+If a previously-indexed file's contents have changed and no longer look like
+media (e.g. the user overwrote the file with text), the row is flagged
+`missing = 1` rather than updated — watch history and any custom collection
+references stay intact, and the row can un-miss if media content is restored
+at the same path later.
+
+Audio vs. video is a probe-time decision, not a sniff-time decision — see
+[`05-jobs-and-workers.md`](./05-jobs-and-workers.md) and the `is_audio_only`
+column in [`03-data-model.md`](./03-data-model.md).
 
 ## Dry-run mode
 

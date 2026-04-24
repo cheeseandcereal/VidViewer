@@ -27,17 +27,13 @@ use crate::{
 
 pub mod dry_run;
 mod mutations;
+mod sniff;
 #[cfg(test)]
 mod tests;
 mod verify;
 mod walk;
 
 pub use dry_run::{dry_run_report, DryRunReport};
-
-/// Allowed video file extensions (lowercase, no dot).
-pub const VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "wmv", "mpg", "mpeg", "ts", "m2ts",
-];
 
 /// Filesystem paths to the derived-asset cache. Passed to the scanner so it can verify
 /// that flagged-as-done outputs actually exist on disk; if a file is missing (cache was
