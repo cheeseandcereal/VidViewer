@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- VidViewer audio placeholder: music note on a dark rounded square. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90" preserveAspectRatio="xMidYMid meet">
+  <rect width="160" height="90" fill="#1a1b26"/>
+  <g transform="translate(58 20)" fill="#7aa2f7">
+    <!-- Stem -->
+    <rect x="22" y="0" width="4" height="38" rx="1"/>
+    <!-- Note head (filled ellipse) -->
+    <ellipse cx="14" cy="40" rx="10" ry="7"/>
+    <!-- Flag curl -->
+    <path d="M26 0 L40 6 L40 16 Q32 10 26 14 Z"/>
+  </g>
+</svg>

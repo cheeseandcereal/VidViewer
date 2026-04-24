@@ -17,6 +17,7 @@ pub struct HistoryEntry {
     pub filename: String,
     pub duration_secs: Option<f64>,
     pub thumbnail_ok: bool,
+    pub is_audio_only: bool,
     pub last_watched_at: DateTime<Utc>,
     pub position_secs: f64,
     pub completed: bool,
@@ -124,7 +125,7 @@ pub async fn start_position(pool: &SqlitePool, video_id: &VideoId) -> Result<f64
 pub async fn list(pool: &SqlitePool) -> Result<Vec<HistoryEntry>> {
     let rows = sqlx::query(
         "SELECT wh.video_id, wh.last_watched_at, wh.position_secs, wh.completed, wh.watch_count, \
-                v.filename, v.duration_secs, v.thumbnail_ok, v.updated_at \
+                v.filename, v.duration_secs, v.thumbnail_ok, v.is_audio_only, v.updated_at \
          FROM watch_history wh JOIN videos v ON v.id = wh.video_id \
          ORDER BY wh.last_watched_at DESC LIMIT 500",
     )
@@ -138,6 +139,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HistoryEntry>> {
             filename: r.get("filename"),
             duration_secs: r.get("duration_secs"),
             thumbnail_ok: bool_from_i64(&r, "thumbnail_ok"),
+            is_audio_only: bool_from_i64(&r, "is_audio_only"),
             last_watched_at: datetime_from_rfc3339(&r, "last_watched_at")?,
             position_secs: r.get("position_secs"),
             completed: bool_from_i64(&r, "completed"),

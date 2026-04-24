@@ -367,6 +367,24 @@ table.dirs th {
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
+.audio-badge {
+    position: absolute;
+    left: 6px; top: 6px;
+    background: rgba(122,162,247,0.15);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 4px;
+}
+/* Audio-placeholder <img>s should show the full music-note icon with
+   'letterbox' space around it rather than being cropped by object-fit:
+   cover; the underlying svg has its own tuned aspect ratio. */
+.video-thumb img.audio-placeholder,
+.detail-poster img.audio-placeholder {
+    object-fit: contain;
+    background: var(--surface-2);
+}
 
 .video-filename {
     padding: var(--space-2);

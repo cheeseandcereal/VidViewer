@@ -73,19 +73,24 @@
 {% else %}
 <div class="video-grid" data-collection-id="{{ collection.id }}">
   {% for v in videos %}
-    <a class="video-card{% if v.missing %} missing{% endif %}" href="/videos/{{ v.id }}?cid={{ collection.id }}">
-      <div class="video-thumb hover-scrub"
+    <a class="video-card{% if v.missing %} missing{% endif %}{% if v.is_audio_only %} audio{% endif %}" href="/videos/{{ v.id }}?cid={{ collection.id }}">
+      <div class="video-thumb{% if !v.is_audio_only %} hover-scrub{% endif %}"
            data-video-id="{{ v.id }}"
            data-preview-ok="{% if v.preview_ok %}1{% else %}0{% endif %}"
            data-duration="{{ v.duration_secs.unwrap_or(0.0) }}"
            data-cache-bust="{{ v.updated_at_epoch }}">
         {% if v.thumbnail_ok %}
           <img src="/thumbs/{{ v.id }}.jpg?v={{ v.updated_at_epoch }}" alt="" loading="lazy">
+        {% else if v.is_audio_only %}
+          <img class="audio-placeholder" src="/static/audio_placeholder.svg" alt="" loading="lazy">
         {% else %}
           <div class="thumb-placeholder"></div>
         {% endif %}
         {% if v.duration_secs.is_some() %}
           <span class="duration-badge">{{ v.duration_secs|duration }}</span>
+        {% endif %}
+        {% if v.is_audio_only %}
+          <span class="audio-badge" title="Audio">🎵</span>
         {% endif %}
         {% if v.missing %}
           <span class="missing-badge">missing</span>

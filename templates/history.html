@@ -17,6 +17,8 @@
     <a class="thumb" href="/videos/{{ e.video_id }}">
       {% if e.thumbnail_ok %}
         <img src="/thumbs/{{ e.video_id }}.jpg?v={{ e.updated_at_epoch }}" alt="" loading="lazy">
+      {% else if e.is_audio_only %}
+        <img class="audio-placeholder" src="/static/audio_placeholder.svg" alt="" loading="lazy">
       {% else %}
         <div class="thumb-placeholder"></div>
       {% endif %}

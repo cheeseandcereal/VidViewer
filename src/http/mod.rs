@@ -335,4 +335,56 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn detail_page_for_audio_only_row_shows_audio_only_label() {
+        let state = test_state().await;
+        let pool = state.pool.clone();
+        let clock = state.clock.clone();
+
+        // Seed a directory + audio-only video row directly.
+        let tmp = tempfile::tempdir().unwrap();
+        let videos = tmp.path().to_path_buf();
+        let dir = crate::directories::add(&pool, &clock, &videos, Some("audio lib".into()))
+            .await
+            .unwrap();
+        let vid = crate::ids::VideoId::new_random();
+        let now_s = clock.now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO videos (id, directory_id, relative_path, filename, size_bytes, \
+             mtime_unix, duration_secs, codec, thumbnail_ok, preview_ok, missing, \
+             is_audio_only, attached_pic_stream_index, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 1, 1, 201.0, 'mp3', 0, 0, 0, 1, NULL, ?, ?)",
+        )
+        .bind(vid.as_str())
+        .bind(dir.id.raw())
+        .bind("song.mp3")
+        .bind("song.mp3")
+        .bind(&now_s)
+        .bind(&now_s)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/videos/{}", vid.as_str()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(s.contains("Audio only"), "expected 'Audio only' in body");
+        assert!(
+            s.contains("/static/audio_placeholder.svg"),
+            "expected audio placeholder img src in body"
+        );
+    }
 }

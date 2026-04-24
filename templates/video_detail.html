@@ -4,18 +4,23 @@
 
 {% block content %}
 <section class="video-detail">
-  <div class="detail-poster hover-scrub"
+  <div class="detail-poster{% if !video.is_audio_only %} hover-scrub{% endif %}{% if video.is_audio_only %} audio{% endif %}"
        data-video-id="{{ video.id }}"
        data-preview-ok="{% if video.preview_ok %}1{% else %}0{% endif %}"
        data-duration="{{ video.duration_secs.unwrap_or(0.0) }}"
        data-cache-bust="{{ updated_at_epoch }}">
     {% if video.thumbnail_ok %}
       <img class="poster" src="/thumbs/{{ video.id }}.jpg?v={{ updated_at_epoch }}" alt="">
+    {% else if video.is_audio_only %}
+      <img class="poster audio-placeholder" src="/static/audio_placeholder.svg" alt="">
     {% else %}
       <div class="thumb-placeholder"></div>
     {% endif %}
     {% if video.duration_secs.is_some() %}
       <span class="duration-badge">{{ video.duration_secs|duration }}</span>
+    {% endif %}
+    {% if video.is_audio_only %}
+      <span class="audio-badge" title="Audio">🎵</span>
     {% endif %}
     {% if video.missing %}
       <span class="missing-badge">missing</span>
@@ -40,7 +45,7 @@
     <dl class="kv detail-meta">
       <dt>Duration</dt><dd>{% if video.duration_secs.is_some() %}{{ video.duration_secs|duration }}{% else %}—{% endif %}</dd>
       <dt>Resolution</dt>
-      <dd>{% match video.width %}{% when Some with (w) %}{% if video.height.is_some() %}{{ w }}×{{ video.height.unwrap() }}{% else %}{{ w }}{% endif %}{% when None %}—{% endmatch %}</dd>
+      <dd>{% if video.is_audio_only %}Audio only{% else %}{% match video.width %}{% when Some with (w) %}{% if video.height.is_some() %}{{ w }}×{{ video.height.unwrap() }}{% else %}{{ w }}{% endif %}{% when None %}—{% endmatch %}{% endif %}</dd>
       <dt>Codec</dt><dd>{% if video.codec.is_some() %}{{ video.codec.as_ref().unwrap() }}{% else %}—{% endif %}</dd>
       <dt>Size</dt><dd>{{ size_label }}</dd>
       <dt>Directory</dt><dd>{{ directory_label }}</dd>

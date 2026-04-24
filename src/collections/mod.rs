@@ -479,6 +479,7 @@ pub struct VideoCard {
     pub thumbnail_ok: bool,
     pub preview_ok: bool,
     pub missing: bool,
+    pub is_audio_only: bool,
     pub updated_at_epoch: i64,
 }
 
@@ -494,7 +495,8 @@ pub async fn videos_in(pool: &SqlitePool, id: CollectionId) -> Result<Vec<VideoC
         Kind::Directory => {
             let dir = directory_id.map(|d| d.raw()).unwrap_or(-1);
             sqlx::query(
-                "SELECT id, filename, duration_secs, thumbnail_ok, preview_ok, missing, updated_at \
+                "SELECT id, filename, duration_secs, thumbnail_ok, preview_ok, missing, \
+                        is_audio_only, updated_at \
                  FROM videos WHERE directory_id = ? AND missing = 0 \
                  ORDER BY id",
             )
@@ -504,7 +506,8 @@ pub async fn videos_in(pool: &SqlitePool, id: CollectionId) -> Result<Vec<VideoC
             .context("videos_in (directory)")?
         }
         Kind::Custom => sqlx::query(
-            "SELECT v.id, v.filename, v.duration_secs, v.thumbnail_ok, v.preview_ok, v.missing, v.updated_at \
+            "SELECT v.id, v.filename, v.duration_secs, v.thumbnail_ok, v.preview_ok, v.missing, \
+                    v.is_audio_only, v.updated_at \
              FROM videos v \
              WHERE v.missing = 0 AND v.directory_id IN \
                (SELECT directory_id FROM collection_directories WHERE collection_id = ?) \
@@ -525,6 +528,7 @@ pub async fn videos_in(pool: &SqlitePool, id: CollectionId) -> Result<Vec<VideoC
             thumbnail_ok: bool_from_i64(&r, "thumbnail_ok"),
             preview_ok: bool_from_i64(&r, "preview_ok"),
             missing: bool_from_i64(&r, "missing"),
+            is_audio_only: bool_from_i64(&r, "is_audio_only"),
             updated_at_epoch: dt.timestamp(),
         });
     }
