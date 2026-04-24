@@ -4,10 +4,17 @@ This file gives AI agents (and humans) the context needed to be productive on th
 
 ## What this is
 
-**VidViewer** is a local-first, self-hosted web app for browsing a personal video library.
-It scans configured directories, generates thumbnails and hover-scrub previews, organizes videos
-into collections (directory-based and custom), and launches selected videos in `mpv` (not in-browser).
-Watch history and resume positions are captured via `mpv`'s JSON IPC.
+**VidViewer** is a local-first, self-hosted web app for browsing a personal media library.
+It scans configured directories (media files are detected by content sniffing — no
+extension allowlist), generates thumbnails and hover-scrub previews, organizes items
+into collections (directory-based and custom), and launches selected files in `mpv`
+(not in-browser). Watch history and resume positions are captured via `mpv`'s JSON IPC.
+
+Both video and audio files are supported. Audio files skip preview generation and use
+their embedded cover art (or a static music-note placeholder) as the thumbnail; mpv is
+launched with `--force-window=yes` so audio playback still shows a controllable window.
+Despite the historical "video" naming in the codebase (tables, types, routes), a
+"video" row in VidViewer is any playable media item, audio included.
 
 ## Platform and stack
 

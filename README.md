@@ -1,10 +1,11 @@
 # VidViewer
 
-A local-first, self-hosted web app for browsing a personal video library on Linux.
+A local-first, self-hosted web app for browsing a personal media library on Linux.
 
 Scan one or more directories, generate thumbnails and YouTube-style hover-scrub previews,
-organize videos into directory-backed and custom collections, launch selected videos in
+organize videos into directory-backed and custom collections, launch selected files in
 your local `mpv` player, and track watch history and resume positions via mpv's JSON IPC.
+Audio files are indexed alongside videos and play through the same mpv pipeline.
 
 ## Design goals
 
@@ -41,6 +42,13 @@ at a folder of videos, and wait for the scanner to finish.
 
 - Add/remove directories via the UI (soft-remove preserves watch history).
 - Auto-generated **directory collections** plus user-curated **custom collections**.
+- **Content-detected media**: files are classified by magic-byte sniffing, not
+  file extensions. Videos and audio files (mp3, flac, ogg, opus, m4a, wav,
+  whatever `ffprobe` accepts) are indexed with no extension allowlist.
+- **Audio files are first-class citizens.** Previews are skipped (no visual
+  timeline), thumbnails are extracted from embedded cover art when present
+  and fall back to a music-note placeholder otherwise. mpv launches with
+  `--force-window=yes` so audio playback still gets a controllable UI.
 - **Poster thumbnails** and a **preview tile sheet + WebVTT** for hover-scrub over the seek bar.
 - **Click to play in mpv.** Progress is persisted; relaunching resumes where you left off.
 - **🎲 Random button** on every collection (hotkey: `R`). Opens the detail page for the pick
