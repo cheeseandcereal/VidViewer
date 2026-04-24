@@ -163,6 +163,8 @@ impl VideoTool for CountingPreviewTool {
             width: Some(640),
             height: Some(360),
             codec: Some("h264".into()),
+            is_audio_only: false,
+            attached_pic_stream_index: None,
         })
     }
     async fn thumbnail(&self, _src: &Path, _dst: &Path, _at_secs: f64, _width: u32) -> Result<()> {

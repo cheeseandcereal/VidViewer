@@ -31,6 +31,16 @@ pub struct ProbeResult {
     pub width: Option<i64>,
     pub height: Option<i64>,
     pub codec: Option<String>,
+    /// True when the file has at least one audio stream and zero video
+    /// streams that aren't flagged `disposition.attached_pic` (i.e.
+    /// embedded cover art). Drives preview-skip and UI affordances
+    /// downstream.
+    pub is_audio_only: bool,
+    /// Zero-based index of a still-image stream inside the container,
+    /// typically embedded cover art. `Some` when the file has an
+    /// `attached_pic` stream that the thumbnail job can extract. None
+    /// otherwise.
+    pub attached_pic_stream_index: Option<i64>,
 }
 
 /// A plan for a preview tile sheet.

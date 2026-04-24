@@ -310,24 +310,32 @@ impl Workers {
 
         let now_s = self.clock.now().to_rfc3339();
         sqlx::query(
-            "UPDATE videos SET duration_secs = ?, width = ?, height = ?, codec = ?, updated_at = ? \
+            "UPDATE videos SET duration_secs = ?, width = ?, height = ?, codec = ?, \
+             is_audio_only = ?, attached_pic_stream_index = ?, updated_at = ? \
              WHERE id = ?",
         )
         .bind(result.duration_secs)
         .bind(result.width)
         .bind(result.height)
         .bind(&result.codec)
+        .bind(result.is_audio_only as i64)
+        .bind(result.attached_pic_stream_index)
         .bind(&now_s)
         .bind(video_id.as_str())
         .execute(&self.pool)
         .await
         .context("updating video probe result")?;
 
-        // Enqueue the derived jobs now that we know duration.
+        // Enqueue the derived jobs now that we know what kind of file this is.
         let mut conn = self.pool.acquire().await?;
         jobs::enqueue_on(&mut conn, Kind::Thumbnail, video_id).await?;
-        if result.duration_secs.unwrap_or(0.0) > 0.0 {
+        // Preview jobs only make sense for files with a real video stream
+        // AND a known duration. Audio files (even ones with cover art) stay
+        // without previews intentionally — see docs/design/06.
+        if !result.is_audio_only && result.duration_secs.unwrap_or(0.0) > 0.0 {
             jobs::enqueue_on(&mut conn, Kind::Preview, video_id).await?;
+        } else if result.is_audio_only {
+            info!("skipping preview enqueue: audio-only file");
         } else {
             info!("skipping preview enqueue: duration unknown or zero");
         }
@@ -336,6 +344,8 @@ impl Workers {
             width = ?result.width,
             height = ?result.height,
             codec = ?result.codec,
+            is_audio_only = result.is_audio_only,
+            attached_pic = ?result.attached_pic_stream_index,
             "probe produced metadata"
         );
         Ok(())

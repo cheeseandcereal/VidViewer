@@ -51,6 +51,8 @@ async fn probe_enqueues_thumbnail_and_preview() {
             width: Some(1280),
             height: Some(720),
             codec: Some("h264".into()),
+            is_audio_only: false,
+            attached_pic_stream_index: None,
         },
     );
     let video_tool: VideoToolRef = Arc::new(mock);

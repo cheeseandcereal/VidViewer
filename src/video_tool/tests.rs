@@ -20,6 +20,8 @@ async fn mock_records_calls() {
             width: Some(640),
             height: Some(360),
             codec: Some("h264".into()),
+            is_audio_only: false,
+            attached_pic_stream_index: None,
         },
     );
     let r = m.probe(Path::new("/x.mp4")).await.unwrap();
