@@ -36,7 +36,14 @@ impl VideoTool for BlockingTool {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    async fn thumbnail(&self, _src: &Path, _dst: &Path, _at_secs: f64, _width: u32) -> Result<()> {
+    async fn thumbnail(
+        &self,
+        _src: &Path,
+        _dst: &Path,
+        _at_secs: f64,
+        _width: u32,
+        _stream_index: Option<i64>,
+    ) -> Result<()> {
         Ok(())
     }
     async fn previews(
@@ -167,7 +174,14 @@ impl VideoTool for CountingPreviewTool {
             attached_pic_stream_index: None,
         })
     }
-    async fn thumbnail(&self, _src: &Path, _dst: &Path, _at_secs: f64, _width: u32) -> Result<()> {
+    async fn thumbnail(
+        &self,
+        _src: &Path,
+        _dst: &Path,
+        _at_secs: f64,
+        _width: u32,
+        _stream_index: Option<i64>,
+    ) -> Result<()> {
         Ok(())
     }
     async fn previews(

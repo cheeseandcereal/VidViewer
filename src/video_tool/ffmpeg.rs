@@ -71,25 +71,41 @@ impl VideoTool for FfmpegTool {
         parse_ffprobe_json(&out.stdout)
     }
 
-    async fn thumbnail(&self, src: &Path, dst: &Path, at_secs: f64, width: u32) -> Result<()> {
+    async fn thumbnail(
+        &self,
+        src: &Path,
+        dst: &Path,
+        at_secs: f64,
+        width: u32,
+        stream_index: Option<i64>,
+    ) -> Result<()> {
         if let Some(parent) = dst.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let at = format!("{at_secs:.3}");
         let vf = format!("scale={width}:-2");
-        let status = tokio::process::Command::new("ffmpeg")
-            .arg("-y")
-            .arg("-ss")
-            .arg(&at)
-            .arg("-i")
-            .arg(src)
-            .arg("-frames:v")
-            .arg("1")
-            .arg("-vf")
-            .arg(&vf)
-            .arg(dst)
+        let mut cmd = tokio::process::Command::new("ffmpeg");
+        cmd.arg("-y");
+        if let Some(idx) = stream_index {
+            // Cover-art mode: pull frame 0 of the specified stream index.
+            // This is how we extract embedded album art from audio files —
+            // ffprobe reports such streams with disposition.attached_pic = 1,
+            // and `-map 0:<N>` + `-frames:v 1` extracts exactly that image.
+            cmd.arg("-i").arg(src);
+            cmd.arg("-map").arg(format!("0:{idx}"));
+            cmd.arg("-frames:v").arg("1");
+            cmd.arg("-vf").arg(&vf);
+        } else {
+            // Normal mode: input-side seek to the requested timestamp.
+            let at = format!("{at_secs:.3}");
+            cmd.arg("-ss").arg(&at);
+            cmd.arg("-i").arg(src);
+            cmd.arg("-frames:v").arg("1");
+            cmd.arg("-vf").arg(&vf);
+        }
+        cmd.arg(dst);
+        let status = cmd
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true)

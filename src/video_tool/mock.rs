@@ -30,6 +30,7 @@ pub enum MockCall {
         dst: PathBuf,
         at_secs: f64,
         width: u32,
+        stream_index: Option<i64>,
     },
     Preview {
         src: PathBuf,
@@ -64,13 +65,21 @@ impl VideoTool for MockVideoTool {
             .ok_or_else(|| anyhow!("no mock probe result for {}", path.display()))
     }
 
-    async fn thumbnail(&self, src: &Path, dst: &Path, at_secs: f64, width: u32) -> Result<()> {
+    async fn thumbnail(
+        &self,
+        src: &Path,
+        dst: &Path,
+        at_secs: f64,
+        width: u32,
+        stream_index: Option<i64>,
+    ) -> Result<()> {
         let mut st = self.inner.lock().unwrap();
         st.calls.push(MockCall::Thumbnail {
             src: src.to_path_buf(),
             dst: dst.to_path_buf(),
             at_secs,
             width,
+            stream_index,
         });
         // Pretend to write the file so callers that stat it succeed.
         if let Some(parent) = dst.parent() {

@@ -129,3 +129,29 @@ If `duration_secs` is null (probe failed or reported 0):
 
 - Preview generation is skipped; `preview_ok` stays 0.
 - Hover-scrub degrades to a static poster.
+
+## Audio-only files
+
+Rows with `is_audio_only = 1` (see [`03-data-model.md`](./03-data-model.md))
+are handled specially:
+
+- **Previews are never generated.** Audio files have no visual timeline.
+  The `preview` job is not enqueued at probe time, and the scanner's
+  cache-verification pass skips preview checks for audio rows.
+- **Thumbnails come from embedded cover art when present.** If the probe
+  found a stream with `disposition.attached_pic = 1` (common in MP3, FLAC,
+  M4A), the thumbnail job extracts frame 0 of that stream and re-encodes
+  it to `thumbnail_width`:
+
+    ```
+    ffmpeg -y -i <abs_path> -map 0:<N> -frames:v 1 \
+        -vf scale=<thumbnail_width>:-2 \
+        <cache>/thumbs/<video_id>.jpg
+    ```
+
+  `<N>` is the stored `attached_pic_stream_index`. Re-encoding keeps the
+  cache size uniform with video thumbnails.
+- **Otherwise, no thumbnail file is written.** `thumbnail_ok` stays 0. The
+  UI renders `static/audio_placeholder.svg` (a music-note icon) for audio
+  rows with no cached thumbnail, which is embedded in the binary via
+  `rust-embed` alongside the rest of the static assets.

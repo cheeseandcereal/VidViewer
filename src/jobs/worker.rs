@@ -352,25 +352,63 @@ impl Workers {
     }
 
     async fn run_thumbnail(&self, video_id: &VideoId) -> Result<()> {
-        let (abs_path, duration) = self.load_for_job(video_id).await?;
-        // Use the midpoint of the video for the poster frame. If duration is unknown
-        // or zero, fall back to 5 seconds in (a safe default that skips intros/logos
-        // on most clips).
-        let at = match duration {
-            Some(d) if d > 0.0 => d * 0.5,
-            _ => 5.0,
-        };
-        let dst = self.thumb_dir.join(format!("{}.jpg", video_id.as_str()));
-        info!(
-            path = %abs_path.display(),
-            at_secs = at,
-            width = self.config.thumbnail_width,
-            dst = %dst.display(),
-            "generating thumbnail"
-        );
-        self.video_tool
-            .thumbnail(&abs_path, &dst, at, self.config.thumbnail_width)
-            .await?;
+        let (abs_path, duration, is_audio_only, attached_pic_stream_index) =
+            self.load_full_for_job(video_id).await?;
+
+        // Strategy:
+        //   - Real video: seek to the video midpoint (or 5s fallback) and
+        //     grab one frame. Same behavior this job has always had.
+        //   - Audio-only + attached cover art: extract frame 0 of the
+        //     cover-art stream. Use thumbnail_width as the target for
+        //     consistency with video thumbnails.
+        //   - Audio-only + no cover art: skip. The UI falls back to a
+        //     static placeholder image when thumbnail_ok = 0 for an audio
+        //     row.
+        if is_audio_only {
+            let Some(stream_idx) = attached_pic_stream_index else {
+                info!(
+                    video_id = %video_id,
+                    "audio-only file with no attached cover art; skipping thumbnail"
+                );
+                return Ok(());
+            };
+            let dst = self.thumb_dir.join(format!("{}.jpg", video_id.as_str()));
+            info!(
+                path = %abs_path.display(),
+                stream = stream_idx,
+                width = self.config.thumbnail_width,
+                dst = %dst.display(),
+                "extracting cover-art thumbnail"
+            );
+            self.video_tool
+                .thumbnail(
+                    &abs_path,
+                    &dst,
+                    0.0,
+                    self.config.thumbnail_width,
+                    Some(stream_idx),
+                )
+                .await?;
+        } else {
+            // Use the midpoint of the video for the poster frame. If duration is unknown
+            // or zero, fall back to 5 seconds in (a safe default that skips intros/logos
+            // on most clips).
+            let at = match duration {
+                Some(d) if d > 0.0 => d * 0.5,
+                _ => 5.0,
+            };
+            let dst = self.thumb_dir.join(format!("{}.jpg", video_id.as_str()));
+            info!(
+                path = %abs_path.display(),
+                at_secs = at,
+                width = self.config.thumbnail_width,
+                dst = %dst.display(),
+                "generating thumbnail"
+            );
+            self.video_tool
+                .thumbnail(&abs_path, &dst, at, self.config.thumbnail_width, None)
+                .await?;
+        }
 
         let now_s = self.clock.now().to_rfc3339();
         sqlx::query("UPDATE videos SET thumbnail_ok = 1, updated_at = ? WHERE id = ?")
@@ -436,8 +474,20 @@ impl Workers {
 
     /// Load the absolute path and current duration for a video.
     async fn load_for_job(&self, video_id: &VideoId) -> Result<(PathBuf, Option<f64>)> {
+        let (abs, duration, _, _) = self.load_full_for_job(video_id).await?;
+        Ok((abs, duration))
+    }
+
+    /// Like `load_for_job`, but also returns `is_audio_only` and the
+    /// attached-pic stream index. The thumbnail job needs both to decide
+    /// whether to extract cover art; other jobs can use the smaller variant.
+    async fn load_full_for_job(
+        &self,
+        video_id: &VideoId,
+    ) -> Result<(PathBuf, Option<f64>, bool, Option<i64>)> {
         let row = sqlx::query(
-            "SELECT d.path, v.relative_path, v.duration_secs \
+            "SELECT d.path, v.relative_path, v.duration_secs, \
+                    v.is_audio_only, v.attached_pic_stream_index \
              FROM videos v JOIN directories d ON d.id = v.directory_id \
              WHERE v.id = ?",
         )
@@ -450,9 +500,11 @@ impl Workers {
         let dir_path: String = row.get("path");
         let relative_path: String = row.get("relative_path");
         let duration: Option<f64> = row.get("duration_secs");
+        let is_audio_only: i64 = row.get("is_audio_only");
+        let attached_pic_stream_index: Option<i64> = row.get("attached_pic_stream_index");
 
         let abs = PathBuf::from(dir_path).join(relative_path);
-        Ok((abs, duration))
+        Ok((abs, duration, is_audio_only != 0, attached_pic_stream_index))
     }
 
     async fn mark(&self, id: i64, status: Status, error: Option<&str>) -> Result<()> {

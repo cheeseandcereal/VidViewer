@@ -63,7 +63,18 @@ pub trait VideoTool: Send + Sync {
     async fn probe(&self, path: &Path) -> Result<ProbeResult>;
 
     /// Generate a single poster thumbnail at the given path.
-    async fn thumbnail(&self, src: &Path, dst: &Path, at_secs: f64, width: u32) -> Result<()>;
+    ///
+    /// When `stream_index` is `Some(i)`, extract frame 0 of the i-th
+    /// stream (used to pull embedded cover art out of audio files via
+    /// `-map 0:i`). When `None`, seek to `at_secs` in the file as normal.
+    async fn thumbnail(
+        &self,
+        src: &Path,
+        dst: &Path,
+        at_secs: f64,
+        width: u32,
+        stream_index: Option<i64>,
+    ) -> Result<()>;
 
     /// Generate a tile-sheet JPEG at `dst` according to the plan.
     ///

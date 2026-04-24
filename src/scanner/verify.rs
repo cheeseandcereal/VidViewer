@@ -25,10 +25,13 @@ pub(super) async fn verify_cache_for_video(
     thumbnail_ok: bool,
     preview_ok: bool,
     duration_secs: Option<f64>,
+    is_audio_only: bool,
     progress: &ScanProgress,
     report: &mut ScanReport,
 ) -> Result<()> {
-    // Thumbnail.
+    // Thumbnail. Audio-only rows still get this check — the file may be a
+    // still-image attached-pic thumbnail that should be regenerated if the
+    // cache was wiped.
     let thumb_path = cache.thumb_path(video_id);
     let thumb_exists = thumb_path.exists();
     if !(thumbnail_ok && thumb_exists) {
@@ -56,7 +59,11 @@ pub(super) async fn verify_cache_for_video(
         );
     }
 
-    // Preview (only when duration is usable).
+    // Preview: skip entirely for audio-only rows. They never have previews
+    // by design, so there's nothing to verify or recover.
+    if is_audio_only {
+        return Ok(());
+    }
     if duration_secs.unwrap_or(0.0) > 0.0 {
         let sheet = cache.preview_sheet_path(video_id);
         let vtt = cache.preview_vtt_path(video_id);

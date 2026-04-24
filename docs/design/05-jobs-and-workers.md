@@ -14,10 +14,32 @@ in two worker lanes backed by the `jobs` table.
 ## Lifecycle
 
 1. Scanner enqueues a `probe` job on new/changed videos.
-2. General worker picks it up, marks `running`, runs ffprobe, writes metadata.
-3. On success it marks `probe` `done` and enqueues `thumbnail` and `preview` jobs.
+2. General worker picks it up, marks `running`, runs ffprobe, writes metadata
+   including `is_audio_only` and `attached_pic_stream_index`.
+3. On success it marks `probe` `done` and enqueues a `thumbnail` job. A
+   `preview` job is enqueued too, unless the file is audio-only or its
+   duration is unknown.
 4. Workers pick those up per their lane.
 5. On any error, the job is marked `failed` with the error message in `error`; no automatic retry for v1.
+
+### Audio-only files
+
+When `probe` sets `is_audio_only = 1`:
+
+- **Preview** is never enqueued. Audio files have no visual timeline and
+  the tile-sheet pipeline would produce garbage.
+- **Thumbnail** behavior depends on whether `attached_pic_stream_index` is
+  populated:
+  - If the probe found an attached-pic stream (embedded cover art), the
+    thumbnail job extracts frame 0 of that stream via
+    `ffmpeg -map 0:<N> -frames:v 1 -vf scale=<thumbnail_width>:-2 …`.
+    Re-encoded to `thumbnail_width` for size consistency with video
+    thumbnails.
+  - Otherwise the job exits early, leaving `thumbnail_ok = 0`. The UI
+    renders a static music-note placeholder for audio rows without a
+    generated thumbnail.
+- The scanner's cache-verification pass skips preview verification entirely
+  for audio-only rows; there's nothing to recover.
 
 ## Lanes
 
