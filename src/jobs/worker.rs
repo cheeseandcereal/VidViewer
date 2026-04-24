@@ -421,7 +421,18 @@ impl Workers {
     }
 
     async fn run_preview(&self, video_id: &VideoId, cancel: &CancellationToken) -> Result<()> {
-        let (abs_path, duration) = self.load_for_job(video_id).await?;
+        let (abs_path, duration, is_audio_only, _attached_pic) =
+            self.load_full_for_job(video_id).await?;
+        // Defense in depth: the scanner and probe-time enqueue both gate on
+        // is_audio_only, but a stale pending preview job could still reach
+        // us (e.g. pre-audio-support rows cleared by reconcile, or some
+        // future edge case). Skipping here means the job transitions to
+        // `done` cleanly rather than spraying "tile 0" errors against a
+        // file that has no video stream.
+        if is_audio_only {
+            info!(%video_id, "skipping preview: row is audio-only");
+            return Ok(());
+        }
         let duration = duration.unwrap_or(0.0);
         if duration <= 0.0 {
             return Err(anyhow!("cannot generate preview without duration"));

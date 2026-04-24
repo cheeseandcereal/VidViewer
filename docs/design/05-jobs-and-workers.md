@@ -65,6 +65,53 @@ Separating preview generation prevents long tile-sheet encodes from starving qui
   probe from being enqueued for the same video. The timeout turns that into
   a normal `failed` outcome, unsticking the `(kind, video_id)` slot.
 
+## Startup reconciliation
+
+`reconcile_on_startup` runs once before workers spawn. It:
+
+- Deletes jobs whose `video_id` no longer exists.
+- Deletes jobs whose video's directory is soft-removed.
+- Deletes jobs for videos flagged `missing = 1`.
+- Heals pre-audio-support probe rows (see below).
+- Resets all remaining `running` rows back to `pending`.
+
+### Stale-probe sweep
+
+Rows matching the fingerprint
+
+```
+width IS NULL AND height IS NULL AND codec IS NULL
+    AND duration_secs IS NOT NULL
+    AND is_audio_only = 0
+```
+
+are pre-audio-support probe results: the old probe populated
+`duration_secs` but left the other metadata columns NULL for audio-only
+files, and pre-dates the `is_audio_only` flag. Without intervention, the
+scanner's cache-verify pass would enqueue preview jobs against them on
+every scan (it trusts `is_audio_only`), and the preview worker would fail
+at tile 0 because the file has no video stream.
+
+For each matching row reconcile clears `duration_secs, width, height,
+codec, thumbnail_ok, preview_ok`, drops any outstanding thumbnail/preview
+jobs, and enqueues a fresh probe. The current classifier then re-reads
+the file and sets `is_audio_only` correctly. Idempotent: once the fresh
+probe completes, the row no longer matches the fingerprint.
+
+## Audio-only defense in depth
+
+Preview jobs are gated in three places:
+
+1. At probe time — `run_probe` skips the preview enqueue when the probe
+   result says `is_audio_only`.
+2. In the scanner's cache-verify pass — `verify_cache_for_video` skips
+   preview verification entirely for rows with `is_audio_only = 1`.
+3. In the preview worker — `run_preview` re-reads `is_audio_only` at
+   job start and returns `Ok(())` (job transitions to `done`, no ffmpeg
+   spawned) when the row is audio-only. This covers stale pending jobs
+   that reached the worker before reconcile got a chance to clear them,
+   or any future edge case.
+
 ## Stuck-job watchdog
 
 In addition to startup reconciliation, a watchdog runs alongside the workers

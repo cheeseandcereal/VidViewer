@@ -251,3 +251,98 @@ async fn audio_only_file_skips_preview_and_uses_cover_art() {
         "expected thumbnail to be invoked with stream_index=Some(1); got calls: {calls:#?}"
     );
 }
+
+#[tokio::test]
+async fn run_preview_skips_audio_only_row_without_failing() {
+    // Defense-in-depth test: if a preview job somehow makes it to the
+    // worker for an is_audio_only=1 row (e.g. pre-existing pending row
+    // post-upgrade, a race, a future bug), the worker must skip it
+    // cleanly and mark it done — not fail against a file with no video.
+    let (tmp, pool, clock, cfg) = setup().await;
+
+    let videos = tmp.path().join("videos");
+    std::fs::create_dir_all(&videos).unwrap();
+    vidviewer::test_support::write_video_fixture(&videos, "song.mp3", b"bytes");
+    add_dir(&pool, &clock, &videos, None).await.unwrap();
+    let cache = CachePaths::from_config(&cfg);
+    let _ = scanner::scan_all(&pool, &clock, &cache).await.unwrap();
+
+    // Mark the row as audio-only with a known duration, and delete the
+    // probe job the scanner enqueued so nothing else runs first.
+    sqlx::query(
+        "UPDATE videos SET duration_secs = 10.0, is_audio_only = 1, \
+             width = NULL, height = NULL, codec = 'mp3'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM jobs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let video_id: String = sqlx::query_scalar("SELECT id FROM videos")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // Inject a preview job directly, bypassing the probe-time gate.
+    let now_s = clock.now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO jobs (kind, video_id, status, created_at, updated_at) \
+         VALUES ('preview', ?, 'pending', ?, ?)",
+    )
+    .bind(&video_id)
+    .bind(&now_s)
+    .bind(&now_s)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mock = MockVideoTool::new();
+    let video_tool: VideoToolRef = Arc::new(mock.clone());
+
+    let workers = Workers {
+        pool: pool.clone(),
+        clock: clock.clone(),
+        config: std::sync::Arc::new(cfg.clone()),
+        video_tool,
+        thumb_dir: cfg.thumb_cache_dir(),
+        preview_dir: cfg.preview_cache_dir(),
+        registry: vidviewer::jobs::registry::JobRegistry::new(),
+    };
+    let _handles = workers.spawn_all(1, 1);
+
+    // Wait for the job to transition out of pending. It must go to done,
+    // not failed.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let row =
+            sqlx::query("SELECT status FROM jobs WHERE video_id = ? AND kind = 'preview' LIMIT 1")
+                .bind(&video_id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let status: Option<String> = row.as_ref().map(|r| r.get("status"));
+        match status.as_deref() {
+            Some("done") => break,
+            Some("failed") => panic!("preview job must not fail for audio-only row"),
+            _ => {}
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("preview job never completed; status={status:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // No preview ffmpeg invocation should have happened on the mock.
+    use vidviewer::video_tool::MockCall;
+    let preview_calls = mock
+        .calls()
+        .into_iter()
+        .filter(|c| matches!(c, MockCall::Preview { .. }))
+        .count();
+    assert_eq!(
+        preview_calls, 0,
+        "no preview work should have been attempted"
+    );
+}
