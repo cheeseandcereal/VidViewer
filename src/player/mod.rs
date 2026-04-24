@@ -56,6 +56,11 @@ impl Player for MpvPlayer {
 
         let mut cmd = tokio::process::Command::new(&self.player_binary);
         cmd.arg(format!("--input-ipc-server={}", socket.display()));
+        // Always force an mpv window so audio-only files (where mpv would
+        // otherwise run headless) still get a controllable UI. For files
+        // with a real video stream this is a no-op since mpv creates the
+        // window from the first decoded frame anyway.
+        cmd.arg("--force-window=yes");
         if start_secs > 0.0 {
             cmd.arg(format!("--start={start_secs:.3}"));
         }

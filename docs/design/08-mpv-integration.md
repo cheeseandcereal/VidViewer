@@ -13,8 +13,14 @@ On `POST /api/videos/:id/play`:
    - If `?start=<secs>` query present, use it.
    - Else use `watch_history.position_secs` (if any, and not completed).
    - Else 0.
-4. Spawn `mpv --input-ipc-server=<sock> --start=<start> --force-window=yes <abs_path>` plus
-   any `player_args` from config.
+4. Spawn `mpv --input-ipc-server=<sock> --force-window=yes --start=<start> <abs_path>` plus
+   any `player_args` from config. `--force-window=yes` is unconditional:
+   for video files it's a no-op (mpv creates a window from the first
+   decoded frame anyway), and for audio files it's essential so there's
+   a visible UI with transport controls. The alternative — omitting the
+   flag and having audio launches silently attach to a headless mpv with
+   no window — is worse UX across the board, and the per-launch
+   classification branch would be brittle.
 5. Return 202 with `{ video_id, session_id }`.
 
 ## IPC session task
