@@ -270,7 +270,10 @@
             const remove = document.createElement('button');
             remove.type = 'button';
             remove.className = 'danger btn-remove';
-            remove.textContent = 'Remove';
+            // Match the server-rendered row in templates/settings.html:
+            // trailing ellipsis signals "opens a modal" rather than
+            // performing the action directly.
+            remove.textContent = 'Remove\u2026';
             actionsTd.append(rescan, ' ', remove);
         }
 
