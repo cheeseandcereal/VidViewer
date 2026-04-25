@@ -46,7 +46,10 @@ impl Default for Config {
         Self {
             port: 7878,
             player: "mpv".into(),
-            player_args: vec!["--force-window=yes".into()],
+            // `--force-window=yes` is added unconditionally by MpvPlayer
+            // (see src/player/mod.rs), so the default extras list stays
+            // empty. Users can still append their own flags here.
+            player_args: Vec::new(),
             thumbnail_width: 480,
             preview_min_interval: 2.0,
             preview_target_count: 56,
