@@ -80,3 +80,86 @@ pub async fn debug_dump(State(state): State<AppState>) -> Response {
     }))
     .into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::http::router;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::Value;
+    use tower::util::ServiceExt;
+
+    async fn state_with_debug(enabled: bool) -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: tmp.path().to_path_buf(),
+            backup_dir: tmp.path().join("backups"),
+            enable_debug_endpoint: enabled,
+            ..crate::config::Config::default()
+        };
+        let db_path = tmp.path().join("vidviewer.db");
+        let pool = crate::db::init(&cfg, &db_path).await.unwrap();
+        std::mem::forget(tmp);
+        AppState::for_test(cfg, pool)
+    }
+
+    #[tokio::test]
+    async fn debug_endpoint_returns_404_when_disabled() {
+        let app = router(state_with_debug(false).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/debug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "debug_endpoint_disabled");
+    }
+
+    #[tokio::test]
+    async fn debug_endpoint_returns_shape_when_enabled() {
+        let app = router(state_with_debug(true).await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/debug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        // Required top-level keys.
+        for key in ["jobs", "videos", "scan", "config"] {
+            assert!(json.get(key).is_some(), "missing key {key}: {json}");
+        }
+        // Jobs sub-object.
+        for key in ["pending", "running", "done", "failed"] {
+            assert!(
+                json["jobs"].get(key).is_some(),
+                "missing jobs.{key}: {json}"
+            );
+        }
+        // Videos sub-object.
+        for key in ["total", "missing", "thumbnail_ok", "preview_ok"] {
+            assert!(
+                json["videos"].get(key).is_some(),
+                "missing videos.{key}: {json}"
+            );
+        }
+        // Config sub-object carries runtime knobs.
+        assert_eq!(json["config"]["port"], 7878);
+    }
+}
