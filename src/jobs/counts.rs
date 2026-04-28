@@ -186,3 +186,204 @@ pub async fn counts_by_directory(pool: &SqlitePool) -> Result<HashMap<i64, Direc
 
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::SqlitePool;
+
+    async fn setup() -> (tempfile::TempDir, SqlitePool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: tmp.path().to_path_buf(),
+            backup_dir: tmp.path().join("backups"),
+            ..crate::config::Config::default()
+        };
+        let db_path = cfg.database_path();
+        let pool = crate::db::init(&cfg, &db_path).await.unwrap();
+        (tmp, pool)
+    }
+
+    async fn insert_job(pool: &SqlitePool, kind: &str, status: &str, video_id: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO jobs (kind, video_id, status, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(kind)
+        .bind(video_id)
+        .bind(status)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Insert a video row directly so jobs can reference it in joins.
+    async fn insert_video(
+        pool: &SqlitePool,
+        vid: &str,
+        dir_id: i64,
+        thumbnail_ok: i64,
+        preview_ok: i64,
+        duration: f64,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO videos (id, directory_id, relative_path, filename, size_bytes, \
+             mtime_unix, duration_secs, thumbnail_ok, preview_ok, missing, is_audio_only, \
+             created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 1, 1, ?, ?, ?, 0, 0, ?, ?)",
+        )
+        .bind(vid)
+        .bind(dir_id)
+        .bind(vid)
+        .bind(vid)
+        .bind(duration)
+        .bind(thumbnail_ok)
+        .bind(preview_ok)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_directory(pool: &SqlitePool, path: &str) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        let row = sqlx::query(
+            "INSERT INTO directories (path, label, added_at, removed) \
+             VALUES (?, ?, ?, 0) RETURNING id",
+        )
+        .bind(path)
+        .bind(path)
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        use sqlx::Row;
+        row.get(0)
+    }
+
+    #[test]
+    fn kind_counts_arithmetic() {
+        let c = KindCounts {
+            pending: 3,
+            running: 1,
+            done: 10,
+            failed: 2,
+        };
+        assert_eq!(c.total_incomplete(), 4);
+        assert_eq!(c.total(), 16);
+    }
+
+    #[test]
+    fn any_incomplete_honors_each_kind() {
+        let mut c = JobCounts::default();
+        assert!(!c.any_incomplete());
+        c.probe.pending = 1;
+        assert!(c.any_incomplete());
+        c.probe.pending = 0;
+        c.thumbnail.running = 1;
+        assert!(c.any_incomplete());
+        c.thumbnail.running = 0;
+        c.preview.pending = 1;
+        assert!(c.any_incomplete());
+    }
+
+    #[test]
+    fn directory_job_counts_busy_reflects_any_incomplete() {
+        let mut d = DirectoryJobCounts::default();
+        assert!(!d.busy());
+        d.probe_incomplete = 1;
+        assert!(d.busy());
+        d.probe_incomplete = 0;
+        d.thumbnail_incomplete = 1;
+        assert!(d.busy());
+        d.thumbnail_incomplete = 0;
+        d.preview_incomplete = 1;
+        assert!(d.busy());
+    }
+
+    #[tokio::test]
+    async fn count_by_status_buckets_by_each_status() {
+        let (_tmp, pool) = setup().await;
+        let dir_id = insert_directory(&pool, "/tmp/x").await;
+        insert_video(&pool, "v1", dir_id, 0, 0, 60.0).await;
+        insert_video(&pool, "v2", dir_id, 0, 0, 60.0).await;
+        insert_video(&pool, "v3", dir_id, 0, 0, 60.0).await;
+        insert_video(&pool, "v4", dir_id, 0, 0, 60.0).await;
+        insert_job(&pool, "probe", "pending", "v1").await;
+        insert_job(&pool, "probe", "running", "v2").await;
+        insert_job(&pool, "thumbnail", "done", "v3").await;
+        insert_job(&pool, "preview", "failed", "v4").await;
+
+        let (p, r, d, f) = count_by_status(&pool).await.unwrap();
+        assert_eq!((p, r, d, f), (1, 1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn counts_breaks_down_by_kind_and_status() {
+        let (_tmp, pool) = setup().await;
+        let dir_id = insert_directory(&pool, "/tmp/y").await;
+        for (i, (kind, status)) in [
+            ("probe", "pending"),
+            ("probe", "done"),
+            ("thumbnail", "pending"),
+            ("thumbnail", "running"),
+            ("thumbnail", "failed"),
+            ("preview", "done"),
+            ("preview", "done"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let vid = format!("v{i}");
+            insert_video(&pool, &vid, dir_id, 0, 0, 60.0).await;
+            insert_job(&pool, kind, status, &vid).await;
+        }
+
+        let c = counts(&pool).await.unwrap();
+        assert_eq!(c.probe.pending, 1);
+        assert_eq!(c.probe.done, 1);
+        assert_eq!(c.thumbnail.pending, 1);
+        assert_eq!(c.thumbnail.running, 1);
+        assert_eq!(c.thumbnail.failed, 1);
+        assert_eq!(c.preview.done, 2);
+        assert_eq!(c.probe.total(), 2);
+        assert!(c.any_incomplete());
+    }
+
+    #[tokio::test]
+    async fn counts_by_directory_aggregates_correctly() {
+        let (_tmp, pool) = setup().await;
+        let a = insert_directory(&pool, "/tmp/a").await;
+        let b = insert_directory(&pool, "/tmp/b").await;
+
+        // Directory A: 2 videos, one with a pending probe and one with a failed thumbnail.
+        insert_video(&pool, "a1", a, 0, 0, 30.0).await;
+        insert_video(&pool, "a2", a, 1, 1, 30.0).await;
+        insert_job(&pool, "probe", "pending", "a1").await;
+        insert_job(&pool, "thumbnail", "failed", "a1").await;
+
+        // Directory B: 1 video with a running preview.
+        insert_video(&pool, "b1", b, 0, 0, 30.0).await;
+        insert_job(&pool, "preview", "running", "b1").await;
+
+        let map = counts_by_directory(&pool).await.unwrap();
+        let dc_a = map.get(&a).expect("dir A present");
+        assert_eq!(dc_a.probe_incomplete, 1);
+        assert_eq!(dc_a.thumbnail_incomplete, 0);
+        assert_eq!(dc_a.failed, 1);
+        assert_eq!(dc_a.video_total, 2);
+        // a1 lacks thumbnail + preview; a2 has both.
+        assert_eq!(dc_a.thumbnail_pending_videos, 1);
+        assert_eq!(dc_a.preview_pending_videos, 1);
+        assert!(dc_a.busy());
+
+        let dc_b = map.get(&b).expect("dir B present");
+        assert_eq!(dc_b.preview_incomplete, 1);
+        assert_eq!(dc_b.video_total, 1);
+    }
+}
