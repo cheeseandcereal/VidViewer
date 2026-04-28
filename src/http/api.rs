@@ -522,3 +522,643 @@ pub async fn delete_history(
     history::clear(&state.pool, &VideoId(id)).await?;
     Ok((StatusCode::NO_CONTENT, ()).into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Router-level integration tests for every api.rs handler. We build
+    //! the real router against a tempdir-backed SQLite pool + mock
+    //! `Player` / `VideoTool`, then drive it with
+    //! `tower::ServiceExt::oneshot` so both routing and handler logic
+    //! are exercised.
+    use super::*;
+    use crate::http::router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::Value;
+    use tower::util::ServiceExt;
+
+    /// Build an AppState wired with mock Player/VideoTool. The tempdir
+    /// holding the DB and cache is leaked so the file sticks around for
+    /// the duration of the test; each test gets a fresh state and a
+    /// fresh tempdir.
+    async fn state() -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: tmp.path().to_path_buf(),
+            backup_dir: tmp.path().join("backups"),
+            ..crate::config::Config::default()
+        };
+        let db_path = tmp.path().join("vidviewer.db");
+        let pool = crate::db::init(&cfg, &db_path).await.unwrap();
+        std::mem::forget(tmp);
+        AppState::for_test(cfg, pool)
+    }
+
+    async fn json_body(resp: Response) -> Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).expect("valid JSON")
+    }
+
+    fn get(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    fn post_json(uri: &str, body: Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn patch_json(uri: &str, body: Value) -> Request<Body> {
+        Request::builder()
+            .method("PATCH")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn delete(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// Create a temp directory on disk and `POST /api/directories` it,
+    /// returning its id. Leaks the tempdir so the path survives the
+    /// test.
+    async fn add_temp_directory(app: &axum::Router) -> (i64, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/directories",
+                serde_json::json!({ "path": path.to_string_lossy() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = json_body(resp).await;
+        let id = body.get("id").and_then(|v| v.as_i64()).unwrap();
+        (id, path)
+    }
+
+    // ---------- Directories ----------
+
+    #[tokio::test]
+    async fn list_and_add_directory() {
+        let app = router(state().await);
+
+        // Empty at start.
+        let resp = app.clone().oneshot(get("/api/directories")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body.as_array().unwrap().len(), 0);
+
+        // Add one.
+        let (_id, _path) = add_temp_directory(&app).await;
+
+        let resp = app.clone().oneshot(get("/api/directories")).await.unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_directory_rejects_non_absolute_path() {
+        let app = router(state().await);
+        let resp = app
+            .oneshot(post_json(
+                "/api/directories",
+                serde_json::json!({ "path": "relative/path" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert_eq!(body["error"], "path_not_absolute");
+    }
+
+    #[tokio::test]
+    async fn add_directory_rejects_missing_path() {
+        let app = router(state().await);
+        let resp = app
+            .oneshot(post_json(
+                "/api/directories",
+                serde_json::json!({ "path": "/tmp/does-not-exist-vidviewer-test" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert_eq!(body["error"], "path_not_found");
+    }
+
+    #[tokio::test]
+    async fn add_directory_duplicate_returns_conflict() {
+        let app = router(state().await);
+        let (_id, path) = add_temp_directory(&app).await;
+        let resp = app
+            .oneshot(post_json(
+                "/api/directories",
+                serde_json::json!({ "path": path.to_string_lossy() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = json_body(resp).await;
+        assert_eq!(body["error"], "path_already_added");
+    }
+
+    #[tokio::test]
+    async fn patch_directory_renames_and_rejects_empty() {
+        let app = router(state().await);
+        let (id, _path) = add_temp_directory(&app).await;
+
+        let resp = app
+            .clone()
+            .oneshot(patch_json(
+                &format!("/api/directories/{id}"),
+                serde_json::json!({ "label": "New Label" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["label"], "New Label");
+
+        let resp = app
+            .oneshot(patch_json(
+                &format!("/api/directories/{id}"),
+                serde_json::json!({ "label": "   " }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn delete_directory_soft_and_hard_and_bad_mode() {
+        let app = router(state().await);
+
+        // Soft remove.
+        let (id, _) = add_temp_directory(&app).await;
+        let resp = app
+            .clone()
+            .oneshot(delete(&format!("/api/directories/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Hard remove a different one.
+        let (id2, _) = add_temp_directory(&app).await;
+        let resp = app
+            .clone()
+            .oneshot(delete(&format!("/api/directories/{id2}?mode=hard")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert!(body.get("deleted_videos").is_some());
+
+        // Bad mode.
+        let (id3, _) = add_temp_directory(&app).await;
+        let resp = app
+            .oneshot(delete(&format!("/api/directories/{id3}?mode=banana")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert_eq!(body["error"], "bad_mode");
+    }
+
+    // ---------- Collections ----------
+
+    #[tokio::test]
+    async fn create_rename_delete_custom_collection() {
+        let app = router(state().await);
+
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/collections",
+                serde_json::json!({ "name": "Mine" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = json_body(resp).await;
+        let cid = body["id"].as_i64().unwrap();
+        assert_eq!(body["name"], "Mine");
+        assert_eq!(body["kind"], "custom");
+
+        // Rename.
+        let resp = app
+            .clone()
+            .oneshot(patch_json(
+                &format!("/api/collections/{cid}"),
+                serde_json::json!({ "name": "Renamed" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["name"], "Renamed");
+
+        // Delete.
+        let resp = app
+            .oneshot(delete(&format!("/api/collections/{cid}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn create_collection_rejects_empty_name() {
+        let app = router(state().await);
+        let resp = app
+            .oneshot(post_json(
+                "/api/collections",
+                serde_json::json!({ "name": "   " }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert_eq!(body["error"], "empty_name");
+    }
+
+    #[tokio::test]
+    async fn create_collection_with_seed_directories() {
+        let app = router(state().await);
+        let (dir_id, _) = add_temp_directory(&app).await;
+
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/collections",
+                serde_json::json!({
+                    "name": "Seeded",
+                    "directory_ids": [dir_id],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = json_body(resp).await;
+        let cid = body["id"].as_i64().unwrap();
+
+        let resp = app
+            .oneshot(get(&format!("/api/collections/{cid}/directories")))
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body.as_array().unwrap().len(), 1);
+        assert_eq!(body[0]["directory_id"], dir_id);
+    }
+
+    #[tokio::test]
+    async fn delete_directory_collection_is_rejected() {
+        let app = router(state().await);
+        let (_dir_id, _) = add_temp_directory(&app).await;
+        // The directory collection id: fetch from /api/collections.
+        let resp = app.clone().oneshot(get("/api/collections")).await.unwrap();
+        let body = json_body(resp).await;
+        let coll_id = body[0]["id"].as_i64().unwrap();
+
+        let resp = app
+            .oneshot(delete(&format!("/api/collections/{coll_id}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert_eq!(body["error"], "directory_collection_immutable");
+    }
+
+    #[tokio::test]
+    async fn list_collections_filter_by_kind() {
+        let app = router(state().await);
+        let (_dir_id, _) = add_temp_directory(&app).await;
+        // Create a custom one.
+        let _ = app
+            .clone()
+            .oneshot(post_json(
+                "/api/collections",
+                serde_json::json!({ "name": "A" }),
+            ))
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(get("/api/collections?kind=custom"))
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["kind"], "custom");
+
+        let resp = app
+            .oneshot(get("/api/collections?kind=directory"))
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["kind"], "directory");
+    }
+
+    #[tokio::test]
+    async fn add_and_remove_directory_membership_in_custom_collection() {
+        let app = router(state().await);
+        let (dir_id, _) = add_temp_directory(&app).await;
+
+        // Create empty custom.
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/collections",
+                serde_json::json!({ "name": "Empty" }),
+            ))
+            .await
+            .unwrap();
+        let cid = json_body(resp).await["id"].as_i64().unwrap();
+
+        // Add directory.
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/collections/{cid}/directories"),
+                serde_json::json!({ "directory_id": dir_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Remove directory.
+        let resp = app
+            .oneshot(delete(&format!(
+                "/api/collections/{cid}/directories/{dir_id}"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn random_from_empty_collection_is_404() {
+        let app = router(state().await);
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/collections",
+                serde_json::json!({ "name": "E" }),
+            ))
+            .await
+            .unwrap();
+        let cid = json_body(resp).await["id"].as_i64().unwrap();
+
+        let resp = app
+            .oneshot(get(&format!("/api/collections/{cid}/random")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ---------- Videos / history ----------
+
+    async fn seed_video(state: &AppState, dir_id: i64, filename: &str) -> String {
+        use crate::ids::VideoId;
+        let vid = VideoId::new_random();
+        let now_s = state.clock.now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO videos (id, directory_id, relative_path, filename, size_bytes, \
+             mtime_unix, duration_secs, codec, width, height, thumbnail_ok, preview_ok, \
+             missing, is_audio_only, attached_pic_stream_index, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 1, 1, 60.0, 'h264', 1280, 720, 0, 0, 0, 0, NULL, ?, ?)",
+        )
+        .bind(vid.as_str())
+        .bind(dir_id)
+        .bind(filename)
+        .bind(filename)
+        .bind(&now_s)
+        .bind(&now_s)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        vid.to_string()
+    }
+
+    #[tokio::test]
+    async fn get_video_happy_path_and_not_found() {
+        let st = state().await;
+        let (dir_id, _) = {
+            let app = router(st.clone());
+            add_temp_directory(&app).await
+        };
+        let vid = seed_video(&st, dir_id, "sample.mp4").await;
+
+        let app = router(st);
+        let resp = app
+            .clone()
+            .oneshot(get(&format!("/api/videos/{vid}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["video"]["filename"], "sample.mp4");
+
+        let resp = app
+            .oneshot(get("/api/videos/does-not-exist"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn play_video_happy_path_and_missing() {
+        let st = state().await;
+        let (dir_id, _) = {
+            let app = router(st.clone());
+            add_temp_directory(&app).await
+        };
+        let vid = seed_video(&st, dir_id, "playme.mp4").await;
+        let app = router(st.clone());
+
+        // Happy path — MockPlayer records the launch and returns a
+        // SessionHandle with child=None, so the handler skips the
+        // session task and returns 202.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/videos/{vid}/play"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body = json_body(resp).await;
+        assert_eq!(body["status"], "launched");
+
+        // Missing file → 400.
+        sqlx::query("UPDATE videos SET missing = 1 WHERE id = ?")
+            .bind(&vid)
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/videos/{vid}/play"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert_eq!(body["error"], "video_missing");
+    }
+
+    #[tokio::test]
+    async fn history_list_and_delete() {
+        let st = state().await;
+        let (dir_id, _) = {
+            let app = router(st.clone());
+            add_temp_directory(&app).await
+        };
+        let vid = seed_video(&st, dir_id, "watched.mp4").await;
+        // Seed a history row.
+        let now_s = st.clock.now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO watch_history (video_id, last_watched_at, position_secs, completed, \
+             watch_count) VALUES (?, ?, 10.0, 0, 1)",
+        )
+        .bind(&vid)
+        .bind(&now_s)
+        .execute(&st.pool)
+        .await
+        .unwrap();
+
+        let app = router(st);
+        let resp = app.clone().oneshot(get("/api/history")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body.as_array().unwrap().len(), 1);
+
+        let resp = app
+            .clone()
+            .oneshot(delete(&format!("/api/history/{vid}")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = app.oneshot(get("/api/history")).await.unwrap();
+        let body = json_body(resp).await;
+        assert_eq!(body.as_array().unwrap().len(), 0);
+    }
+
+    // ---------- Scan / FS / directory-job-status ----------
+
+    #[tokio::test]
+    async fn start_scan_registers_a_scan_handle() {
+        let app = router(state().await);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scan")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["status"], "started");
+    }
+
+    #[tokio::test]
+    async fn scan_status_reports_phase_after_start() {
+        let st = state().await;
+        let app = router(st.clone());
+
+        // Before any scan — status is idle.
+        let resp = app.clone().oneshot(get("/api/scan/status")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert!(body.get("phase").is_some());
+
+        // Kick off a scan.
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scan")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = app.oneshot(get("/api/scan/status")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert!(body.get("phase").is_some());
+    }
+
+    #[tokio::test]
+    async fn directory_job_status_shape() {
+        let app = router(state().await);
+        let resp = app.oneshot(get("/api/directories/jobs")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        // It's a map; empty on a fresh DB.
+        assert!(body.is_object());
+    }
+
+    #[tokio::test]
+    async fn fs_list_absolute_path_succeeds() {
+        let app = router(state().await);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("child")).unwrap();
+        let path = tmp.path().to_string_lossy().into_owned();
+
+        let resp = app
+            .oneshot(get(&format!(
+                "/api/fs/list?path={}",
+                urlencoding::encode(&path)
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["path"], path);
+        assert!(body["entries"].is_array());
+    }
+
+    #[tokio::test]
+    async fn fs_list_relative_path_is_bad_request() {
+        let app = router(state().await);
+        let resp = app
+            .oneshot(get("/api/fs/list?path=relative"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert_eq!(body["error"], "path_not_absolute");
+    }
+}
