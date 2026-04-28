@@ -50,3 +50,19 @@ build:
 # Install the release binary to ~/.cargo/bin (make sure that's on $PATH)
 install:
     cargo install --path . --locked
+
+# Line/region coverage report via cargo-llvm-cov. Prints a per-file
+# summary to stdout and writes an HTML report to
+# target/llvm-cov/html/index.html. Requires the `llvm-tools-preview`
+# rustup component and `cargo-llvm-cov`; see docs/agents/debugging.md.
+coverage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `rustup component add llvm-tools-preview` installs llvm-cov and
+    # llvm-profdata under the toolchain's lib dir, but cargo-llvm-cov
+    # expects them on PATH. Point at them directly.
+    tc="$(rustup show active-toolchain | awk '{print $1}')"
+    bin="$HOME/.rustup/toolchains/$tc/lib/rustlib/$(rustc -vV | awk '/host:/ {print $2}')/bin"
+    export LLVM_COV="$bin/llvm-cov"
+    export LLVM_PROFDATA="$bin/llvm-profdata"
+    cargo llvm-cov --all-targets --html
