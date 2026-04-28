@@ -147,3 +147,390 @@ pub async fn cleanup_obsolete_failed_jobs(pool: &SqlitePool) -> Result<u64> {
     }
     Ok(deleted)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the stuck-job watchdog and the obsolete-failed-jobs
+    //! cleanup. Extracted from the oversized test block in `jobs/mod.rs`.
+
+    use super::*;
+    use crate::{
+        clock,
+        directories::add as add_dir,
+        jobs::{
+            counts::count_by_status,
+            registry::JobRegistry,
+            test_helpers::{make_workers, setup, test_cache},
+        },
+    };
+
+    #[tokio::test]
+    async fn watchdog_resets_stuck_running_jobs_not_tracked_by_registry() {
+        let (tmp, pool) = setup().await;
+        let clock = clock::system();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
+        add_dir(&pool, &clock, &a, None).await.unwrap();
+        let cache = test_cache(tmp.path());
+        crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
+
+        // Force the scanner-enqueued probe into a fake-stuck state:
+        // status=running with an old updated_at, not tracked in the registry.
+        let old = (clock.now() - chrono::Duration::hours(1)).to_rfc3339();
+        sqlx::query("UPDATE jobs SET status = 'running', updated_at = ?")
+            .bind(&old)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let workers = make_workers(pool.clone(), clock.clone(), tmp.path());
+        let reset = workers
+            .reset_stuck_running(chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+        assert_eq!(reset, 1);
+
+        let (pending, running, _, _) = count_by_status(&pool).await.unwrap();
+        assert_eq!(pending, 1, "stuck running must have been reset to pending");
+        assert_eq!(running, 0);
+    }
+
+    #[tokio::test]
+    async fn watchdog_leaves_live_running_jobs_alone() {
+        let (tmp, pool) = setup().await;
+        let clock = clock::system();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
+        add_dir(&pool, &clock, &a, None).await.unwrap();
+        let cache = test_cache(tmp.path());
+        crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
+
+        // Flip the row to running with an old updated_at…
+        let old = (clock.now() - chrono::Duration::hours(1)).to_rfc3339();
+        sqlx::query("UPDATE jobs SET status = 'running', updated_at = ?")
+            .bind(&old)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job_id: i64 = sqlx::query_scalar("SELECT id FROM jobs LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        // …but register the id with the registry so the watchdog considers
+        // the task alive. The handle/token values don't matter for the
+        // lookup.
+        let workers = make_workers(pool.clone(), clock.clone(), tmp.path());
+        let dummy_task: tokio::task::JoinHandle<()> = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let abort = dummy_task.abort_handle();
+        workers.registry.register(
+            job_id,
+            crate::ids::VideoId("dummy".into()),
+            abort,
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        let reset = workers
+            .reset_stuck_running(chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+        assert_eq!(reset, 0);
+        let (_, running, _, _) = count_by_status(&pool).await.unwrap();
+        assert_eq!(running, 1, "tracked running job must not be touched");
+
+        dummy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn watchdog_respects_age_threshold() {
+        let (tmp, pool) = setup().await;
+        let clock = clock::system();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
+        add_dir(&pool, &clock, &a, None).await.unwrap();
+        let cache = test_cache(tmp.path());
+        crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
+
+        // Running very recently — should be spared.
+        let fresh = clock.now().to_rfc3339();
+        sqlx::query("UPDATE jobs SET status = 'running', updated_at = ?")
+            .bind(&fresh)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let workers = make_workers(pool.clone(), clock.clone(), tmp.path());
+        let reset = workers
+            .reset_stuck_running(chrono::Duration::minutes(5))
+            .await
+            .unwrap();
+        assert_eq!(reset, 0, "fresh running job must not be touched");
+    }
+
+    /// Exercises the free `reset_stuck_running` used by the ad-hoc scan
+    /// path with a short threshold, to confirm the threshold is honored
+    /// end-to-end.
+    #[tokio::test]
+    async fn ad_hoc_reset_with_short_threshold_unsticks_jobs_quickly() {
+        let (tmp, pool) = setup().await;
+        let clock = clock::system();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        crate::test_support::write_video_fixture(&a, "x.mp4", b"x");
+        add_dir(&pool, &clock, &a, None).await.unwrap();
+        let cache = test_cache(tmp.path());
+        crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
+
+        // A probe row stuck in `running` 30 seconds ago, not tracked.
+        let stale = (clock.now() - chrono::Duration::seconds(30)).to_rfc3339();
+        sqlx::query("UPDATE jobs SET status = 'running', updated_at = ?")
+            .bind(&stale)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // A 5-second threshold catches it (30s old > 5s threshold).
+        let registry = JobRegistry::new();
+        let reset = reset_stuck_running(&pool, &clock, &registry, chrono::Duration::seconds(5))
+            .await
+            .unwrap();
+        assert_eq!(reset, 1);
+        let (pending, running, _, _) = count_by_status(&pool).await.unwrap();
+        assert_eq!(pending, 1);
+        assert_eq!(running, 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_obsolete_failed_jobs_removes_audio_only_failures_only() {
+        let (tmp, pool) = setup().await;
+        let clock = clock::system();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        crate::test_support::write_video_fixture(&a, "audio_only.mp3", b"x");
+        crate::test_support::write_video_fixture(&a, "real_video.mp4", b"y");
+        add_dir(&pool, &clock, &a, None).await.unwrap();
+        let cache = test_cache(tmp.path());
+        crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
+
+        // Mark the two rows.
+        sqlx::query("UPDATE videos SET is_audio_only = 1 WHERE filename = 'audio_only.mp3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let audio_id: String =
+            sqlx::query_scalar("SELECT id FROM videos WHERE filename = 'audio_only.mp3'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let video_id: String =
+            sqlx::query_scalar("SELECT id FROM videos WHERE filename = 'real_video.mp4'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        // Clear the jobs table and seed a mix of failed rows.
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let now_s = clock.now().to_rfc3339();
+        for (kind, vid) in [
+            // Should be deleted: audio-only preview + thumbnail failures.
+            ("preview", &audio_id),
+            ("thumbnail", &audio_id),
+            // Should be kept: real-video thumbnail failure (diagnostic history).
+            ("thumbnail", &video_id),
+            // Should be kept: audio-only probe failure (not preview/thumbnail).
+            ("probe", &audio_id),
+        ] {
+            sqlx::query(
+                "INSERT INTO jobs (kind, video_id, status, error, created_at, updated_at) \
+                 VALUES (?, ?, 'failed', 'some error', ?, ?)",
+            )
+            .bind(kind)
+            .bind(vid)
+            .bind(&now_s)
+            .bind(&now_s)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let deleted = cleanup_obsolete_failed_jobs(&pool).await.unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining: Vec<(String, String)> =
+            sqlx::query_as("SELECT kind, video_id FROM jobs ORDER BY kind, video_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        // Only the probe-against-audio and thumbnail-against-video rows survive.
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining
+            .iter()
+            .any(|(k, v)| k == "probe" && v == &audio_id));
+        assert!(remaining
+            .iter()
+            .any(|(k, v)| k == "thumbnail" && v == &video_id));
+    }
+
+    #[tokio::test]
+    async fn cleanup_obsolete_failed_jobs_leaves_non_failed_rows_alone() {
+        let (tmp, pool) = setup().await;
+        let clock = clock::system();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        // Three separate audio-only rows so pending/running/done previews
+        // don't collide on the (kind, video_id) outstanding-unique index.
+        crate::test_support::write_video_fixture(&a, "one.mp3", b"x");
+        crate::test_support::write_video_fixture(&a, "two.mp3", b"y");
+        crate::test_support::write_video_fixture(&a, "three.mp3", b"z");
+        add_dir(&pool, &clock, &a, None).await.unwrap();
+        let cache = test_cache(tmp.path());
+        crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE videos SET is_audio_only = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let vids: Vec<String> = sqlx::query_scalar("SELECT id FROM videos ORDER BY filename")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(vids.len(), 3);
+
+        // One pending, one running, one done preview job. None are failed,
+        // so the cleanup must leave them all alone.
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let now_s = clock.now().to_rfc3339();
+        for (status, vid) in [
+            ("pending", &vids[0]),
+            ("running", &vids[1]),
+            ("done", &vids[2]),
+        ] {
+            sqlx::query(
+                "INSERT INTO jobs (kind, video_id, status, created_at, updated_at) \
+                 VALUES ('preview', ?, ?, ?, ?)",
+            )
+            .bind(vid)
+            .bind(status)
+            .bind(&now_s)
+            .bind(&now_s)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let deleted = cleanup_obsolete_failed_jobs(&pool).await.unwrap();
+        assert_eq!(deleted, 0);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 3);
+    }
+
+    #[tokio::test]
+    async fn cleanup_obsolete_failed_jobs_removes_recovered_video_failures() {
+        // Real video whose thumbnail_ok is 1 now (a later attempt succeeded).
+        // Any historical `failed thumbnail` row for it is just noise and
+        // should be cleaned up. Same logic for preview on preview_ok=1 rows.
+        let (tmp, pool) = setup().await;
+        let clock = clock::system();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        crate::test_support::write_video_fixture(&a, "recovered_thumb.mp4", b"x");
+        crate::test_support::write_video_fixture(&a, "recovered_prev.mp4", b"y");
+        crate::test_support::write_video_fixture(&a, "still_broken.mp4", b"z");
+        add_dir(&pool, &clock, &a, None).await.unwrap();
+        let cache = test_cache(tmp.path());
+        crate::scanner::scan_all(&pool, &clock, &cache)
+            .await
+            .unwrap();
+
+        // Mark the three rows: two recovered (one thumbnail, one preview),
+        // one still broken (nothing generated yet).
+        sqlx::query("UPDATE videos SET thumbnail_ok = 1 WHERE filename = 'recovered_thumb.mp4'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE videos SET preview_ok = 1 WHERE filename = 'recovered_prev.mp4'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let recovered_thumb_id: String =
+            sqlx::query_scalar("SELECT id FROM videos WHERE filename = 'recovered_thumb.mp4'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let recovered_prev_id: String =
+            sqlx::query_scalar("SELECT id FROM videos WHERE filename = 'recovered_prev.mp4'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let still_broken_id: String =
+            sqlx::query_scalar("SELECT id FROM videos WHERE filename = 'still_broken.mp4'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        // Seed failed rows.
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let now_s = clock.now().to_rfc3339();
+        for (kind, vid) in [
+            // Should be deleted: failure superseded by a successful run.
+            ("thumbnail", &recovered_thumb_id),
+            ("preview", &recovered_prev_id),
+            // Should be kept: still broken, operator may want to investigate.
+            ("thumbnail", &still_broken_id),
+        ] {
+            sqlx::query(
+                "INSERT INTO jobs (kind, video_id, status, error, created_at, updated_at) \
+                 VALUES (?, ?, 'failed', 'e', ?, ?)",
+            )
+            .bind(kind)
+            .bind(vid)
+            .bind(&now_s)
+            .bind(&now_s)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let deleted = cleanup_obsolete_failed_jobs(&pool).await.unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining: Vec<(String, String)> =
+            sqlx::query_as("SELECT kind, video_id FROM jobs ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, "thumbnail");
+        assert_eq!(remaining[0].1, still_broken_id);
+    }
+}
