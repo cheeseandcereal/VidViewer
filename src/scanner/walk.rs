@@ -22,6 +22,20 @@ use crate::{
     scanner::{mutations, sniff, verify, CachePaths, ScanProgress, ScanReport},
 };
 
+/// Snapshot of a video row that survived the walk. Passed to the
+/// post-walk cache-verification pass so it can decide whether to
+/// re-enqueue a thumbnail or preview job. Fields mirror the subset of
+/// `videos` columns verify needs; we take the snapshot at walk time to
+/// avoid a second SELECT per row.
+struct SurvivingRow {
+    id: VideoId,
+    thumbnail_ok: bool,
+    preview_ok: bool,
+    duration_secs: Option<f64>,
+    is_audio_only: bool,
+    attached_pic_stream_index: Option<i64>,
+}
+
 /// Existing video row projection used for diffing.
 #[derive(Debug, Clone)]
 struct KnownVideo {
@@ -33,6 +47,7 @@ struct KnownVideo {
     preview_ok: bool,
     duration_secs: Option<f64>,
     is_audio_only: bool,
+    attached_pic_stream_index: Option<i64>,
 }
 
 pub(super) async fn scan_one(
@@ -53,7 +68,8 @@ pub(super) async fn scan_one(
     // 1. Load known videos into memory.
     let rows = sqlx::query(
         "SELECT id, relative_path, size_bytes, mtime_unix, missing, \
-            thumbnail_ok, preview_ok, duration_secs, is_audio_only \
+            thumbnail_ok, preview_ok, duration_secs, is_audio_only, \
+            attached_pic_stream_index \
          FROM videos WHERE directory_id = ?",
     )
     .bind(dir.id.raw())
@@ -68,6 +84,7 @@ pub(super) async fn scan_one(
         let size: i64 = row.get("size_bytes");
         let mtime: i64 = row.get("mtime_unix");
         let duration_secs: Option<f64> = row.get("duration_secs");
+        let attached_pic_stream_index: Option<i64> = row.get("attached_pic_stream_index");
         known.insert(
             rel,
             KnownVideo {
@@ -79,16 +96,17 @@ pub(super) async fn scan_one(
                 preview_ok: bool_from_i64(&row, "preview_ok"),
                 duration_secs,
                 is_audio_only: bool_from_i64(&row, "is_audio_only"),
+                attached_pic_stream_index,
             },
         );
     }
 
     // Collect videos that survive the walk (unchanged or updated) so we can verify
-    // their cache outputs at the end. We keep a (VideoId, thumbnail_ok, preview_ok,
-    // duration_secs, is_audio_only) snapshot — post-walk DB state for those flags
-    // is consistent with what we saw, since the only mutation path that clears
-    // flags (change detected) is self-contained in `update_changed_video`.
-    let mut surviving: Vec<(VideoId, bool, bool, Option<f64>, bool)> = Vec::new();
+    // their cache outputs at the end. Post-walk DB state for these flags is
+    // consistent with what we observed in the snapshot, since the only mutation
+    // path that clears flags (change detected) is self-contained in
+    // `update_changed_video`.
+    let mut surviving: Vec<SurvivingRow> = Vec::new();
 
     // 2. Walk the directory. Non-recursive: only videos sitting directly in
     //    the configured directory are indexed. Subdirectories are ignored
@@ -165,26 +183,28 @@ pub(super) async fn scan_one(
                 progress.files_seen.fetch_add(1, Ordering::Relaxed);
                 report.files_seen += 1;
                 mutations::un_mark_missing(pool, clock, dir, &k.id).await?;
-                surviving.push((
-                    k.id,
-                    k.thumbnail_ok,
-                    k.preview_ok,
-                    k.duration_secs,
-                    k.is_audio_only,
-                ));
+                surviving.push(SurvivingRow {
+                    id: k.id,
+                    thumbnail_ok: k.thumbnail_ok,
+                    preview_ok: k.preview_ok,
+                    duration_secs: k.duration_secs,
+                    is_audio_only: k.is_audio_only,
+                    attached_pic_stream_index: k.attached_pic_stream_index,
+                });
             }
             Some(k) => {
                 // Unchanged: verify cache outputs at the end. No sniff — stat
                 // matches the row we already decided was media.
                 progress.files_seen.fetch_add(1, Ordering::Relaxed);
                 report.files_seen += 1;
-                surviving.push((
-                    k.id,
-                    k.thumbnail_ok,
-                    k.preview_ok,
-                    k.duration_secs,
-                    k.is_audio_only,
-                ));
+                surviving.push(SurvivingRow {
+                    id: k.id,
+                    thumbnail_ok: k.thumbnail_ok,
+                    preview_ok: k.preview_ok,
+                    duration_secs: k.duration_secs,
+                    is_audio_only: k.is_audio_only,
+                    attached_pic_stream_index: k.attached_pic_stream_index,
+                });
             }
         }
     }
@@ -208,16 +228,17 @@ pub(super) async fn scan_one(
     // 4. Verify cache files for unchanged videos. Re-enqueue jobs whose outputs
     //    have been deleted (manual cache wipe, disk swap, etc.). We deliberately
     //    check this only for videos that remain on disk in this scan pass.
-    for (video_id, thumbnail_ok, preview_ok, duration_secs, is_audio_only) in surviving {
+    for row in surviving {
         verify::verify_cache_for_video(
             pool,
             clock,
             cache,
-            &video_id,
-            thumbnail_ok,
-            preview_ok,
-            duration_secs,
-            is_audio_only,
+            &row.id,
+            row.thumbnail_ok,
+            row.preview_ok,
+            row.duration_secs,
+            row.is_audio_only,
+            row.attached_pic_stream_index,
             progress,
             report,
         )

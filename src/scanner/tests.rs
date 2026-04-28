@@ -479,3 +479,91 @@ async fn rescan_enqueues_missing_jobs_even_when_flags_are_zero() {
     assert_eq!(pending_thumb, 1);
     assert_eq!(pending_preview, 1);
 }
+
+#[tokio::test]
+async fn audio_only_without_cover_art_does_not_get_thumbnail_jobs_re_enqueued() {
+    // Regression test: audio-only files with no embedded cover art
+    // cannot produce a thumbnail. The worker skips them cleanly
+    // (returns Ok(()) without setting thumbnail_ok=1), so a naive
+    // verify pass would enqueue a fresh thumbnail job on every scan,
+    // and the pipeline would loop forever. The verify pass must skip
+    // this specific case.
+    let (tmp, pool, clock, cache) = setup().await;
+    let videos_dir = tmp.path().join("videos");
+    std::fs::create_dir_all(&videos_dir).unwrap();
+    write_video(&videos_dir, "song.mp3", b"x");
+
+    add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+    let _ = scan_all(&pool, &clock, &cache).await.unwrap();
+
+    // Simulate probe outcome: audio-only, no attached cover art,
+    // duration populated. Flags all zero because the worker's
+    // thumbnail path skipped (no file produced).
+    sqlx::query(
+        "UPDATE videos SET is_audio_only = 1, attached_pic_stream_index = NULL, \
+             duration_secs = 200.0, codec = 'mp3', \
+             thumbnail_ok = 0, preview_ok = 0",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Clear the job queue so the scan we're about to run starts clean.
+    sqlx::query("DELETE FROM jobs")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Rescan. Verify must not enqueue a thumbnail job for this row.
+    let report = scan_all(&pool, &clock, &cache).await.unwrap();
+    assert_eq!(
+        report.recovered_thumbnail_jobs, 0,
+        "audio-only-no-cover-art rows must not trigger thumbnail re-enqueue"
+    );
+    assert_eq!(report.recovered_preview_jobs, 0);
+    let total_jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total_jobs, 0, "no jobs should have been enqueued");
+}
+
+#[tokio::test]
+async fn audio_only_with_cover_art_still_recovers_thumbnail_after_cache_wipe() {
+    // Audio-only rows *with* cover art must still be eligible for
+    // thumbnail regeneration if the cache file is missing.
+    let (tmp, pool, clock, cache) = setup().await;
+    let videos_dir = tmp.path().join("videos");
+    std::fs::create_dir_all(&videos_dir).unwrap();
+    write_video(&videos_dir, "album.flac", b"x");
+
+    add_dir(&pool, &clock, &videos_dir, None).await.unwrap();
+    let _ = scan_all(&pool, &clock, &cache).await.unwrap();
+
+    // Audio-only with cover art at stream 1, previously-successful
+    // thumbnail (thumbnail_ok=1) but no file on disk (cache wiped).
+    sqlx::query(
+        "UPDATE videos SET is_audio_only = 1, attached_pic_stream_index = 1, \
+             duration_secs = 240.0, codec = 'flac', \
+             thumbnail_ok = 1, preview_ok = 0",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM jobs")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let report = scan_all(&pool, &clock, &cache).await.unwrap();
+    assert_eq!(
+        report.recovered_thumbnail_jobs, 1,
+        "audio-only with cover art must re-enqueue when cache is missing"
+    );
+    let pending_thumb: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'thumbnail'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(pending_thumb, 1);
+}

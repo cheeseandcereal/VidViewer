@@ -26,15 +26,22 @@ pub(super) async fn verify_cache_for_video(
     preview_ok: bool,
     duration_secs: Option<f64>,
     is_audio_only: bool,
+    attached_pic_stream_index: Option<i64>,
     progress: &ScanProgress,
     report: &mut ScanReport,
 ) -> Result<()> {
-    // Thumbnail. Audio-only rows still get this check — the file may be a
-    // still-image attached-pic thumbnail that should be regenerated if the
-    // cache was wiped.
+    // Thumbnail. Skip entirely for the one case where the worker is
+    // guaranteed to no-op and never write a file: an audio-only row with
+    // no embedded cover art. If we enqueued in that case, run_thumbnail
+    // would skip cleanly (returning Ok(()) without setting thumbnail_ok),
+    // the row's flag would stay 0, the cache file would stay absent, and
+    // the next scan would re-enqueue — a per-scan treadmill that never
+    // converges. Audio-only rows WITH cover art still get the check, so
+    // their cache regenerates after a wipe.
     let thumb_path = cache.thumb_path(video_id);
     let thumb_exists = thumb_path.exists();
-    if !(thumbnail_ok && thumb_exists) {
+    let thumb_can_ever_produce = !(is_audio_only && attached_pic_stream_index.is_none());
+    if thumb_can_ever_produce && !(thumbnail_ok && thumb_exists) {
         let now_s = clock.now().to_rfc3339();
         let mut tx = pool.begin().await.context("begin tx")?;
         if thumbnail_ok {
