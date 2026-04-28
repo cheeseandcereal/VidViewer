@@ -71,6 +71,24 @@ All code that shells out to ffmpeg/ffprobe/mpv must go through a trait:
 
 Tests should use the mocks unless they are specifically exercising the real binaries (behind an integration-test feature flag).
 
+### Tests layout
+- **Unit tests live inline** at the bottom of the module they test, inside a
+  `#[cfg(test)] mod tests { ... }` block. This is the standard Rust
+  convention (see the Rust Book) and what >95% of this codebase does.
+  Benefits: tests sit next to the code they document, have free access to
+  private items of the module, and rename/move together under refactors.
+- **Do not create `src/<module>/tests.rs` sibling files.** There used to
+  be a few (scanner, jobs, directories, video_tool) and they've all been
+  inlined. If a test module grows uncomfortably large, that's usually a
+  signal the *production* module should be split, not the test module.
+- **Integration tests** (cross-module, testing the public surface
+  end-to-end) go in the top-level `tests/` directory — one file per
+  scenario, e.g. `tests/worker_pipeline.rs`, `tests/cancellation.rs`.
+- **Shared test fixtures** (currently just `write_video_fixture`) live in
+  `src/test_support.rs`, exposed as `pub` because integration tests in
+  `tests/` link against the crate normally and can't reach
+  `#[cfg(test)]` items. Keep that module tiny and helper-only.
+
 ### Schema migrations
 - Migrations live in `migrations/NNNN_description.sql`.
 - **Never edit a committed migration.** Always add a new one.
@@ -117,10 +135,50 @@ These must remain true; violating them means a bug:
 | Lint | `just lint` |
 | Type-check | `just check` |
 | Unit + integration tests | `just test` |
+| Line coverage report (HTML) | `just coverage` |
 | Run the server | `just run` |
 | Environment sanity | `just doctor` |
 | End-to-end smoke | `just smoke` |
 | Refresh sqlx offline metadata | `just prepare-sqlx` |
+
+## Test coverage
+
+We track line/region/function coverage via [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov).
+
+- Run `just coverage`. It produces a per-file summary on stdout and writes an
+  HTML report to `target/llvm-cov/html/index.html`.
+- Prerequisites (one-time):
+  - `rustup component add llvm-tools-preview`
+  - `cargo install cargo-llvm-cov --locked`
+  The `just coverage` recipe resolves the toolchain-specific `llvm-cov` /
+  `llvm-profdata` paths dynamically, so it works on whichever stable
+  toolchain is active without extra env-var plumbing.
+- **Expected overall coverage is ~85%** after the existing test suite.
+  New code should aim for a similar or better ratio on the files it
+  touches. Deliberate gaps (see below) are fine; contrived tests to hit
+  lines are not.
+
+Files that are intentionally under-covered, and the reason:
+
+- `src/main.rs` — binary entrypoint.
+- `src/logging.rs` — tracing subscriber init.
+- `src/cli.rs` — top-level clap dispatch and doctor subcommand; exercised
+  by running the binary (`just doctor`, `just smoke`), not by unit tests.
+- `src/player/session.rs` — the mpv JSON-IPC session loop. Testing the
+  real loop requires a real mpv or a socket mock that reimplements the
+  protocol. Covered by manual use of the app; `MockPlayer` is used in
+  tests.
+- `src/video_tool/ffmpeg.rs` async methods — the real `FfmpegTool`
+  invocations. Tests go through `MockVideoTool`; the command-builder
+  free functions (e.g. `build_single_frame_command`) are unit-tested.
+- `src/clock.rs` fake-clock helper — unused by tests today; exists for
+  future deterministic-time tests.
+
+When adding new code, prefer **real behavior assertions** (status code,
+DB row contents, stored side-effects) over line-hitting assertions.
+Router-level tests using `tower::util::ServiceExt::oneshot` against the
+real router with `AppState::for_test` are the established pattern (see
+`src/http/api.rs::tests` for the model).
 
 ## How to verify your changes
 
@@ -132,6 +190,9 @@ just check
 just test
 ```
 All four must pass.
+
+If you changed behavior under test, run `just coverage` and confirm no
+unexpected coverage regressions on the files you touched.
 
 If you changed the schema, also:
 - Confirm a new migration file was added (not an edit to an existing one).
