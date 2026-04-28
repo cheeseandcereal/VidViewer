@@ -276,3 +276,186 @@ fn render<T: Template>(t: T) -> Response {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::util::ServiceExt;
+
+    async fn state() -> AppState {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: tmp.path().to_path_buf(),
+            backup_dir: tmp.path().join("backups"),
+            ..crate::config::Config::default()
+        };
+        let db_path = tmp.path().join("vidviewer.db");
+        let pool = crate::db::init(&cfg, &db_path).await.unwrap();
+        std::mem::forget(tmp);
+        AppState::for_test(cfg, pool)
+    }
+
+    async fn fetch_html(app: axum::Router, uri: &str) -> (StatusCode, String) {
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    // ---------- filter + helper coverage ----------
+
+    #[test]
+    fn format_hms_handles_all_magnitudes() {
+        assert_eq!(super::format_hms(0.0), "0:00");
+        assert_eq!(super::format_hms(1.4), "0:01");
+        assert_eq!(super::format_hms(59.5), "1:00");
+        assert_eq!(super::format_hms(60.0), "1:00");
+        assert_eq!(super::format_hms(3599.0), "59:59");
+        assert_eq!(super::format_hms(3600.0), "1:00:00");
+        assert_eq!(super::format_hms(3661.0), "1:01:01");
+        // Negative clamps to zero.
+        assert_eq!(super::format_hms(-5.0), "0:00");
+    }
+
+    #[test]
+    fn duration_filter_for_some_and_none() {
+        assert_eq!(super::filters::duration(&None).unwrap(), "");
+        assert_eq!(super::filters::duration(&Some(125.0)).unwrap(), "2:05");
+        assert_eq!(super::filters::duration(&Some(3600.0)).unwrap(), "1:00:00");
+    }
+
+    #[test]
+    fn duration_secs_filter_format() {
+        assert_eq!(super::filters::duration_secs(&30.0).unwrap(), "0:30");
+        assert_eq!(super::filters::duration_secs(&0.0).unwrap(), "0:00");
+    }
+
+    #[test]
+    fn progress_pct_handles_none_zero_and_clamps() {
+        assert_eq!(super::filters::progress_pct(&10.0, &None).unwrap(), "0");
+        assert_eq!(
+            super::filters::progress_pct(&10.0, &Some(0.0)).unwrap(),
+            "0"
+        );
+        assert_eq!(
+            super::filters::progress_pct(&50.0, &Some(200.0)).unwrap(),
+            "25.0"
+        );
+        // Over 100% clamps.
+        assert_eq!(
+            super::filters::progress_pct(&300.0, &Some(100.0)).unwrap(),
+            "100.0"
+        );
+        // Negatives clamp to 0.
+        assert_eq!(
+            super::filters::progress_pct(&-5.0, &Some(100.0)).unwrap(),
+            "0.0"
+        );
+    }
+
+    #[test]
+    fn humanize_bytes_chooses_sensible_unit() {
+        assert_eq!(super::humanize_bytes(500), "500 bytes");
+        assert_eq!(super::humanize_bytes(1536), "1.5 KiB");
+        assert!(super::humanize_bytes(3 * 1024 * 1024).ends_with("MiB"));
+        assert!(super::humanize_bytes(5 * 1024 * 1024 * 1024).ends_with("GiB"));
+    }
+
+    // ---------- page handler coverage ----------
+
+    #[tokio::test]
+    async fn home_page_renders_empty_library_placeholder() {
+        let (status, body) = fetch_html(router(state().await), "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<!doctype html>"));
+        assert!(body.contains("Your library is empty"));
+    }
+
+    #[tokio::test]
+    async fn settings_page_renders() {
+        let (status, body) = fetch_html(router(state().await), "/settings").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Settings"));
+        assert!(body.contains("Add Directory"));
+    }
+
+    #[tokio::test]
+    async fn history_page_renders_empty_state() {
+        let (status, body) = fetch_html(router(state().await), "/history").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("No watch history yet"));
+    }
+
+    #[tokio::test]
+    async fn collection_page_renders_and_404s_on_unknown() {
+        let st = state().await;
+        // Seed a directory via the DB directly so we have a directory collection.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let dir = crate::directories::add(&st.pool, &st.clock, &path, Some("MyLib".into()))
+            .await
+            .unwrap();
+
+        let (status, body) = fetch_html(
+            router(st.clone()),
+            &format!("/collections/{}", dir.collection_id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("MyLib"));
+
+        let (status, _) = fetch_html(router(st), "/collections/99999").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn video_detail_page_renders_with_seeded_row_and_404s_on_missing() {
+        let st = state().await;
+
+        // Seed a directory and a video row that get_detail can resolve.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let dir = crate::directories::add(&st.pool, &st.clock, &path, None)
+            .await
+            .unwrap();
+
+        let vid = crate::ids::VideoId::new_random();
+        let now_s = st.clock.now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO videos (id, directory_id, relative_path, filename, size_bytes, \
+             mtime_unix, duration_secs, codec, width, height, thumbnail_ok, preview_ok, \
+             missing, is_audio_only, attached_pic_stream_index, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 2048, 1, 125.0, 'h264', 1920, 1080, 0, 0, 0, 0, NULL, ?, ?)",
+        )
+        .bind(vid.as_str())
+        .bind(dir.id.raw())
+        .bind("clip.mp4")
+        .bind("clip.mp4")
+        .bind(&now_s)
+        .bind(&now_s)
+        .execute(&st.pool)
+        .await
+        .unwrap();
+
+        let (status, body) =
+            fetch_html(router(st.clone()), &format!("/videos/{}", vid.as_str())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("clip.mp4"));
+        assert!(body.contains("1920"));
+        // Duration humanizer picked up.
+        assert!(body.contains("2:05"));
+
+        let (status, _) = fetch_html(router(st), "/videos/does-not-exist").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+}
