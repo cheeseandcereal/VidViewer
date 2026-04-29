@@ -62,7 +62,8 @@ Despite the historical "video" naming in the codebase (tables, types, routes), a
 - Use typed IDs: `VideoId`, `CollectionId`, `DirectoryId` (see `src/ids.rs`). Never pass bare `String`/`i64` IDs.
 - Use the `Clock` trait (`src/clock.rs`) for any `now()` call. Inject it so tests are deterministic.
 - Prefer straightforward imperative code over clever iterator chains.
-- Target ≤ 400 LOC per file; split earlier rather than later.
+- Target ≤ 400 LOC of production code per file; split earlier rather than
+  later. Test modules are counted separately (see "Tests layout" below).
 
 ### External process boundaries
 All code that shells out to ffmpeg/ffprobe/mpv must go through a trait:
@@ -72,22 +73,42 @@ All code that shells out to ffmpeg/ffprobe/mpv must go through a trait:
 Tests should use the mocks unless they are specifically exercising the real binaries (behind an integration-test feature flag).
 
 ### Tests layout
-- **Unit tests live inline** at the bottom of the module they test, inside a
-  `#[cfg(test)] mod tests { ... }` block. This is the standard Rust
-  convention (see the Rust Book) and what >95% of this codebase does.
-  Benefits: tests sit next to the code they document, have free access to
-  private items of the module, and rename/move together under refactors.
-- **Do not create `src/<module>/tests.rs` sibling files.** There used to
-  be a few (scanner, jobs, directories, video_tool) and they've all been
-  inlined. If a test module grows uncomfortably large, that's usually a
-  signal the *production* module should be split, not the test module.
+- **Unit tests live inline at the bottom of the source file that owns
+  the behavior they cover**, inside a `#[cfg(test)] mod tests { ... }`
+  block. This is the standard Rust convention (see the Rust Book) and
+  what this codebase uses everywhere. Benefits: tests sit next to the
+  code they document, have free access to private items of the module,
+  and rename/move together under refactors.
+- **"Tests next to the code they test" is about the file, not the
+  module directory.** When a module is split across sibling files
+  (`foo/reads.rs`, `foo/mutations.rs`, `foo/types.rs`), each test
+  block goes into the file whose functions it exercises — not a single
+  dumping-ground block in `foo/mod.rs`. See `src/collections/` and
+  `src/jobs/` for the pattern.
+- **Do not create `src/<module>/tests.rs` sibling files.** Tests must
+  be inline in their corresponding source file. If a test module grows
+  uncomfortably large, that's usually a signal the *production* module
+  should be split — extract sibling files by behavior and move each
+  test block with its target.
+- **Shared test fixtures within a module go in a
+  `src/<module>/test_helpers.rs` file**, gated with
+  `#![cfg(test)]` and exposing `pub(super) fn ...` helpers. This is a
+  *helpers module*, not a tests module — it must not contain any
+  `#[test]` or `#[tokio::test]` functions. See
+  `src/jobs/test_helpers.rs`, `src/collections/test_helpers.rs`, and
+  `src/http/api/test_helpers.rs` for the established pattern.
+- **Cross-module shared fixtures** live in `src/test_support.rs`,
+  exposed as `pub` because integration tests in the top-level
+  `tests/` directory link against the crate normally and can't reach
+  `#[cfg(test)]` items. Keep that module tiny and helper-only (the
+  only item today is `write_video_fixture`).
 - **Integration tests** (cross-module, testing the public surface
   end-to-end) go in the top-level `tests/` directory — one file per
   scenario, e.g. `tests/worker_pipeline.rs`, `tests/cancellation.rs`.
-- **Shared test fixtures** (currently just `write_video_fixture`) live in
-  `src/test_support.rs`, exposed as `pub` because integration tests in
-  `tests/` link against the crate normally and can't reach
-  `#[cfg(test)]` items. Keep that module tiny and helper-only.
+- **Target ≤ 400 LOC per source file for *production* code**, with
+  tests counted separately. A file that's 300 lines of code + 500
+  lines of tests is fine. A file that's 500 lines of production code
+  is a signal to split.
 
 ### Schema migrations
 - Migrations live in `migrations/NNNN_description.sql`.
