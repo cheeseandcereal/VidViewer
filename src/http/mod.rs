@@ -1,13 +1,10 @@
-//! HTTP server setup.
-//!
-//! Wires the router, static-file serving, page handlers, and graceful shutdown.
+//! HTTP server lifecycle: startup reconciliation, worker spawn, bind,
+//! graceful shutdown. Router wiring lives in [`routes`].
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use anyhow::{Context, Result};
-use axum::Router;
 use tokio::signal;
-use tower_http::{services::ServeDir, trace::TraceLayer};
 
 use crate::state::AppState;
 
@@ -15,7 +12,10 @@ pub mod api;
 pub mod debug;
 pub mod error;
 pub mod pages;
+pub mod routes;
 pub mod static_assets;
+
+pub(crate) use routes::router;
 
 pub async fn serve(state: AppState) -> Result<()> {
     let port = state.config.port;
@@ -106,88 +106,6 @@ pub async fn serve(state: AppState) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn router(state: AppState) -> Router {
-    let thumbs_dir = ServeDir::new(state.config.thumb_cache_dir());
-    let previews_dir = ServeDir::new(state.config.preview_cache_dir());
-
-    Router::new()
-        .route("/healthz", axum::routing::get(healthz))
-        .route("/", axum::routing::get(pages::home))
-        .route(
-            "/collections/:id",
-            axum::routing::get(pages::collection_page),
-        )
-        .route("/videos/:id", axum::routing::get(pages::video_detail_page))
-        .route("/history", axum::routing::get(pages::history_page))
-        .route("/settings", axum::routing::get(pages::settings))
-        .route(
-            "/api/directories",
-            axum::routing::get(api::list_directories).post(api::add_directory),
-        )
-        .route(
-            "/api/directories/:id",
-            axum::routing::patch(api::patch_directory).delete(api::delete_directory),
-        )
-        .route(
-            "/api/collections",
-            axum::routing::get(api::list_collections).post(api::create_collection),
-        )
-        .route(
-            "/api/collections/:id",
-            axum::routing::patch(api::rename_collection).delete(api::delete_collection),
-        )
-        .route(
-            "/api/collections/:id/videos",
-            axum::routing::get(api::list_collection_videos),
-        )
-        .route(
-            "/api/collections/:id/directories",
-            axum::routing::get(api::list_collection_directories)
-                .post(api::add_directory_to_collection),
-        )
-        .route(
-            "/api/collections/:cid/directories/:did",
-            axum::routing::delete(api::remove_directory_from_collection),
-        )
-        .route(
-            "/api/collections/:id/random",
-            axum::routing::get(api::random_from_collection),
-        )
-        .route("/api/videos/:id", axum::routing::get(api::get_video))
-        .route("/api/videos/:id/play", axum::routing::post(api::play_video))
-        .route("/api/history", axum::routing::get(api::list_history))
-        .route(
-            "/api/history/:id",
-            axum::routing::delete(api::delete_history),
-        )
-        .route("/api/fs/list", axum::routing::get(api::fs_list))
-        .route("/api/scan", axum::routing::post(api::start_scan))
-        .route("/api/scan/status", axum::routing::get(api::scan_status))
-        .route(
-            "/api/directories/jobs",
-            axum::routing::get(api::directory_job_status),
-        )
-        .route("/debug", axum::routing::get(debug::debug_dump))
-        .route("/static/*path", axum::routing::get(static_assets::serve))
-        .route("/favicon.ico", axum::routing::get(static_assets::favicon))
-        .nest_service("/thumbs", thumbs_dir)
-        .nest_service("/previews", previews_dir)
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
-}
-
-async fn healthz() -> axum::response::Response {
-    use axum::response::IntoResponse;
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )],
-        "ok",
-    )
-        .into_response()
-}
-
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(err) = signal::ctrl_c().await {
@@ -217,6 +135,11 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    //! Router-level smoke tests: static assets, favicon, home page, and
+    //! one audio-detail-page test that seeds a video row directly. Tests
+    //! for individual handlers live next to their implementations (see
+    //! `api/*.rs::tests` and `pages.rs::tests`).
+
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
