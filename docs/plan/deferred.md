@@ -18,6 +18,11 @@ Ideas out of MVP scope. Add to this file whenever a useful idea comes up during 
 - **File listing toggle** in the directory picker (currently directories only).
 - **Per-job progress breakdown UI** in the header (queue depth, current kind).
 - **Retry failed jobs** endpoint / button.
+- **Collection-grid filter extensions** — the v1 length filter is client-side
+  bucket-only. Extensions: custom numeric min/max range, dual-handle slider,
+  URL-shareable `?min=&max=` query params (server-side SQL filtering),
+  `N of M visible` count in the header, inline "no matches" message,
+  and reusing the same control on the history page.
 - **Automated `vidviewer restore-backup`** subcommand.
 - **Detach** option on directory remove — keep the `directories` row, mark everything missing,
   but don't cascade on re-add.

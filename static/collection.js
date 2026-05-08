@@ -69,6 +69,69 @@
         });
     }
 
+    // ---- Length filter ----
+    //
+    // Client-side only. Reads `data-duration` (seconds, float) from each
+    // card's `.video-thumb` and toggles the `hidden` attribute. Cards with
+    // unknown duration (`data-duration` missing, NaN, or <= 0) are always
+    // shown regardless of the selected bucket. Selection persists globally
+    // across collection pages in localStorage.
+    const lengthSelect = document.getElementById('filter-length');
+    const LEN_KEY = 'vv.collection.lengthFilter';
+    function readLengthFilter() {
+        try {
+            return localStorage.getItem(LEN_KEY) || 'any';
+        } catch {
+            return 'any';
+        }
+    }
+    function writeLengthFilter(val) {
+        try { localStorage.setItem(LEN_KEY, val); } catch { /* ignore */ }
+    }
+    function parseBucket(v) {
+        if (!v || v === 'any') return null;
+        const parts = v.split('-');
+        if (parts.length !== 2) return null;
+        const min = Number(parts[0]);
+        const max = parts[1] === '' ? null : Number(parts[1]);
+        if (Number.isNaN(min) || (max !== null && Number.isNaN(max))) return null;
+        return { min, max };
+    }
+    function applyLengthFilter(v) {
+        if (!grid) return;
+        const bucket = parseBucket(v);
+        const cards = grid.querySelectorAll('.video-card');
+        for (const card of cards) {
+            if (bucket === null) {
+                card.hidden = false;
+                continue;
+            }
+            const durStr = card.querySelector('.video-thumb')?.dataset.duration;
+            const dur = Number(durStr);
+            if (!Number.isFinite(dur) || dur <= 0) {
+                // Unknown duration — always visible.
+                card.hidden = false;
+                continue;
+            }
+            const inRange = dur >= bucket.min && (bucket.max === null || dur < bucket.max);
+            card.hidden = !inRange;
+        }
+    }
+
+    if (lengthSelect) {
+        const stored = readLengthFilter();
+        // Guard against stale keys that no longer match an <option>.
+        const valid = Array.from(lengthSelect.options).some(o => o.value === stored);
+        const initial = valid ? stored : 'any';
+        lengthSelect.value = initial;
+        applyLengthFilter(initial);
+        lengthSelect.addEventListener('change', () => {
+            const val = lengthSelect.value;
+            writeLengthFilter(val);
+            applyLengthFilter(val);
+        });
+    }
+
     async function goRandom() {
         if (!cid) return;
         const resp = await fetch(`/api/collections/${encodeURIComponent(cid)}/random`);

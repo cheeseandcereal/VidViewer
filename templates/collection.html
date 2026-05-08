@@ -22,6 +22,15 @@
             aria-label="Toggle sort order" title="Toggle sort order">
       <span id="btn-sort-label">Z → A</span>
     </button>
+    <select id="filter-length" aria-label="Filter by length"
+            {% if videos.is_empty() %}disabled{% endif %}>
+      <option value="any">Any length</option>
+      <option value="0-60">&lt; 1 min</option>
+      <option value="60-300">1–5 min</option>
+      <option value="300-1200">5–20 min</option>
+      <option value="1200-3600">20–60 min</option>
+      <option value="3600-">&gt; 60 min</option>
+    </select>
     {% match collection.kind %}
       {% when crate::collections::Kind::Custom %}
         <button type="button" id="btn-rename">Rename</button>
