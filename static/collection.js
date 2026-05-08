@@ -72,10 +72,15 @@
     // ---- Length filter ----
     //
     // Client-side only. Reads `data-duration` (seconds, float) from each
-    // card's `.video-thumb` and toggles the `hidden` attribute. Cards with
+    // card's `.video-thumb` and toggles a `.filtered-out` class. Cards with
     // unknown duration (`data-duration` missing, NaN, or <= 0) are always
-    // shown regardless of the selected bucket. Selection persists globally
-    // across collection pages in localStorage.
+    // shown regardless of the selected threshold. Selection persists
+    // globally across collection pages in localStorage.
+    //
+    // The class toggle (rather than the `hidden` attribute) is required
+    // because `.video-card { display: block }` has higher specificity than
+    // the UA `[hidden] { display: none }` rule, so the attribute alone
+    // wouldn't hide anything.
     const lengthSelect = document.getElementById('filter-length');
     const LEN_KEY = 'vv.collection.lengthFilter';
     function readLengthFilter() {
@@ -88,33 +93,29 @@
     function writeLengthFilter(val) {
         try { localStorage.setItem(LEN_KEY, val); } catch { /* ignore */ }
     }
-    function parseBucket(v) {
+    function parseThreshold(v) {
         if (!v || v === 'any') return null;
-        const parts = v.split('-');
-        if (parts.length !== 2) return null;
-        const min = Number(parts[0]);
-        const max = parts[1] === '' ? null : Number(parts[1]);
-        if (Number.isNaN(min) || (max !== null && Number.isNaN(max))) return null;
-        return { min, max };
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
     }
     function applyLengthFilter(v) {
         if (!grid) return;
-        const bucket = parseBucket(v);
+        const threshold = parseThreshold(v);
         const cards = grid.querySelectorAll('.video-card');
         for (const card of cards) {
-            if (bucket === null) {
-                card.hidden = false;
+            if (threshold === null) {
+                card.classList.remove('filtered-out');
                 continue;
             }
             const durStr = card.querySelector('.video-thumb')?.dataset.duration;
             const dur = Number(durStr);
             if (!Number.isFinite(dur) || dur <= 0) {
                 // Unknown duration — always visible.
-                card.hidden = false;
+                card.classList.remove('filtered-out');
                 continue;
             }
-            const inRange = dur >= bucket.min && (bucket.max === null || dur < bucket.max);
-            card.hidden = !inRange;
+            const keep = dur > threshold;
+            card.classList.toggle('filtered-out', !keep);
         }
     }
 

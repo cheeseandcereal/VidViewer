@@ -365,6 +365,7 @@ table.dirs th {
 }
 .video-card:hover { border-color: var(--accent); transform: translateY(-1px); text-decoration: none; }
 .video-card.missing { opacity: 0.5; }
+.video-card.filtered-out { display: none; }
 
 .video-thumb {
     position: relative;
